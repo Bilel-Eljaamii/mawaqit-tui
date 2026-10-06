@@ -21,5 +21,10 @@ test:
 cov:
     cargo llvm-cov --workspace --summary-only
 
+# Layering gate: `use mawaqit_api` only under src/infrastructure (ADR-0001 §1)
+layering:
+    @result=$(grep -rn "use mawaqit_api" src --include="*.rs" | grep -v "^src/infrastructure/" || true); \
+    if [ -n "$result" ]; then echo "LAYERING VIOLATION:"; echo "$result"; exit 1; else echo "layering: clean"; fi
+
 # Every gate, in order — must be green on the FINAL tree before any commit
-verify: fmt clippy test cov
+verify: fmt clippy test cov layering
