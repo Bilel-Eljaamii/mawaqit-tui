@@ -56,6 +56,7 @@ fn today_fixture() -> TodayReadout {
         times: DailyTimes { adhan, iqama: Some(iqama), shurouq: Some(t("06:40")) },
         tz: TzSource::Mosque(chrono_tz::Tz::Europe__Paris),
         mosque_name: Some("Grande Mosquée de Paris".to_owned()),
+        jumua: Some(t("12:45")),
     }
 }
 
@@ -256,9 +257,18 @@ fn api_today(iqama: Option<mawaqit_api::DailyIqamaTimes>) -> TodayTimes {
 }
 
 fn conf_fixture(tz: Option<&str>, name: Option<&str>) -> ConfData {
+    conf_fixture_with_jumua(tz, name, None)
+}
+
+fn conf_fixture_with_jumua(
+    tz: Option<&str>,
+    name: Option<&str>,
+    jumua: Option<&str>,
+) -> ConfData {
     serde_json::from_value(serde_json::json!({
         "timezone": tz,
         "name": name,
+        "jumua": jumua,
     }))
     .unwrap()
 }
@@ -283,10 +293,15 @@ fn month_iqama_day(day: u32) -> mawaqit_api::DayIqamaTimes {
 #[test]
 fn today_maps_iqama_mosque_name_and_tz() {
     // @tier ephemeral
-    let conf = conf_fixture(Some("Europe/Paris"), Some("Grande Mosquée de Paris"));
+    let conf = conf_fixture_with_jumua(
+        Some("Europe/Paris"),
+        Some("Grande Mosquée de Paris"),
+        Some("12:45"),
+    );
     let readout = map_today(&api_today(Some(api_iqama())), &conf).unwrap();
     assert_eq!(readout.tz, TzSource::Mosque(chrono_tz::Tz::Europe__Paris));
     assert_eq!(readout.mosque_name.as_deref(), Some("Grande Mosquée de Paris"));
+    assert_eq!(readout.jumua, Some(t("12:45")));
     let iqama = readout.times.iqama.unwrap();
     assert_eq!(iqama.get(PrayerName::Fajr), t("05:20"));
     assert_eq!(readout.times.shurouq, Some(t("06:40")));
@@ -381,4 +396,63 @@ mod system_clock {
         let after = Utc::now();
         assert!(before <= now && now <= after);
     }
+}
+
+mod wall_clock {
+    use chrono::{TimeZone, Utc};
+    use chrono_tz::Tz;
+    use mawaqit_tui::{
+        application::{clock::day_moment_from_utc, ports::TzSource},
+        domain::prayer::DayMoment,
+    };
+
+    fn dm(h: u8, m: u8, s: u8) -> DayMoment {
+        DayMoment::from_hms(h, m, s).unwrap()
+    }
+
+    #[test]
+    fn mosque_tz_winter_and_summer_offsets() {
+        // @tier durable
+        // Summer (CEST, +02:00)
+        let summer = Utc.with_ymd_and_hms(2026, 10, 6, 10, 30, 0).unwrap();
+        assert_eq!(
+            day_moment_from_utc(summer, TzSource::Mosque(Tz::Europe__Paris)),
+            dm(12, 30, 0)
+        );
+        // Winter (CET, +01:00)
+        let winter = Utc.with_ymd_and_hms(2026, 1, 15, 10, 30, 0).unwrap();
+        assert_eq!(
+            day_moment_from_utc(winter, TzSource::Mosque(Tz::Europe__Paris)),
+            dm(11, 30, 0)
+        );
+    }
+
+    #[test]
+    fn dst_spring_transition_is_correct() {
+        // @tier durable
+        // 2026-03-29: Paris jumps CET→CEST at 01:00 UTC, so 01:30 UTC is
+        // +02:00.
+        let during = Utc.with_ymd_and_hms(2026, 3, 29, 1, 30, 0).unwrap();
+        assert_eq!(
+            day_moment_from_utc(during, TzSource::Mosque(Tz::Europe__Paris)),
+            dm(3, 30, 0)
+        );
+    }
+
+    #[test]
+    fn local_fallback_uses_system_zone() {
+        // @tier durable
+        let instant = Utc.with_ymd_and_hms(2026, 10, 6, 10, 30, 0).unwrap();
+        let expected =
+            DayMoment::from_naive_time(instant.with_timezone(&chrono::Local).time());
+        assert_eq!(day_moment_from_utc(instant, TzSource::Local), expected.unwrap());
+    }
+}
+
+#[test]
+fn hostile_jumua_degrades_to_none() {
+    // @tier ephemeral
+    let conf = conf_fixture_with_jumua(None, None, Some("noon"));
+    let readout = map_today(&api_today(None), &conf).unwrap();
+    assert_eq!(readout.jumua, None);
 }

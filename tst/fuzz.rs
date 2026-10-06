@@ -7,7 +7,7 @@
 
 use mawaqit_tui::domain::{
     mosque::MosqueId,
-    prayer::{ClockTime, PrayerName, PrayerSet, next_prayer},
+    prayer::{ClockTime, DayMoment, PrayerName, PrayerSet, next_prayer, next_prayer_at},
 };
 use proptest::prelude::{TestCaseError, *};
 
@@ -91,5 +91,24 @@ proptest! {
             Err(err) => return Err(TestCaseError::fail(format!("slug {s:?} rejected: {err}"))),
         };
         prop_assert_eq!(id.as_str(), s);
+    }
+
+    /// ROLLOVER-CORRECT at second resolution: selection matches the minute
+    /// model, remaining stays bounded, and into+remaining == interval for
+    /// every valid set — degenerate all-equal sets included. (spec M3 R1)
+    #[test]
+    fn next_prayer_at_contract(now_s in 0u32..86400u32, set in arb_set()) {
+        let now = DayMoment::new(now_s).unwrap();
+        let next = next_prayer_at(now, &set);
+        prop_assert!(next.seconds_remaining >= 1 && next.seconds_remaining <= 86_400);
+        prop_assert_eq!(
+            next.seconds_into_previous + next.seconds_remaining,
+            next.interval_seconds
+        );
+        let minute_now =
+            ClockTime::from_hms((now_s / 3600) as u8, ((now_s % 3600) / 60) as u8).unwrap();
+        let minute_next = next_prayer(minute_now, &set);
+        prop_assert_eq!(next.name, minute_next.name);
+        prop_assert_eq!(next.is_tomorrow, minute_next.is_tomorrow);
     }
 }

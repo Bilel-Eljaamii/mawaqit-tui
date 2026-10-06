@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Application-level error: one vocabulary over ports and settings.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppError {
     #[error(transparent)]
     Port(#[from] PortError),

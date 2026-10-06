@@ -66,11 +66,15 @@ pub fn map_today(api: &TodayTimes, conf: &ConfData) -> Result<TodayReadout, Port
         Some(times) => Some(parse_iqama(times)?),
         None => None,
     };
+    // Display-only like shurouq: a parse failure degrades, it does not fail
+    // the day. `jumua2` (second Friday slot) is not surfaced in M3.
+    let jumua = conf.jumua.as_deref().and_then(|raw| ClockTime::parse_hhmm(raw).ok());
     Ok(TodayReadout {
         date: api.date,
         times: DailyTimes { adhan, iqama, shurouq },
         tz: resolve_tz(conf),
         mosque_name: conf.name.clone(),
+        jumua,
     })
 }
 

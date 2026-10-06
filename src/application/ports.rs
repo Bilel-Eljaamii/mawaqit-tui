@@ -48,6 +48,8 @@ pub struct TodayReadout {
     pub times: DailyTimes,
     pub tz: TzSource,
     pub mosque_name: Option<String>,
+    /// Friday congregational time when the mosque publishes one (M3).
+    pub jumua: Option<ClockTime>,
 }
 
 /// One row of a month view.

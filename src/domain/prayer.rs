@@ -4,6 +4,8 @@
 
 use core::{fmt, fmt::Display};
 
+use chrono::Timelike;
+
 /// Five daily prayers in day order. Shurouq is display-only and lives on
 /// [`DailyTimes`], never here (spec M1 R2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -111,6 +113,11 @@ impl ClockTime {
     pub const fn minutes(self) -> u32 {
         self.hour as u32 * 60 + self.minute as u32
     }
+
+    /// Seconds since midnight (minute granularity × 60).
+    pub const fn seconds(self) -> u32 {
+        self.minutes() * 60
+    }
 }
 
 impl Display for ClockTime {
@@ -175,6 +182,17 @@ pub struct DailyTimes {
     pub shurouq: Option<ClockTime>,
 }
 
+impl DailyTimes {
+    /// The congregation-following set: iqama when published, else adhan
+    /// (next-prayer highlight rule, issue #3).
+    pub const fn preferred(&self) -> PrayerSet {
+        match self.iqama {
+            Some(iqama) => iqama,
+            None => self.adhan,
+        }
+    }
+}
+
 /// The next prayer and where `now` sits in the day (spec M1 R4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NextPrayer {
@@ -218,5 +236,111 @@ pub const fn next_prayer(now: ClockTime, set: &PrayerSet) -> NextPrayer {
         previous: PrayerName::Isha,
         minutes_remaining: MINUTES_PER_DAY - now.minutes() + fajr.minutes(),
         is_tomorrow: true,
+    }
+}
+
+// ---- M3: second-resolution selection (spec M3 R1) --------------------------
+
+/// Second-resolution moment within a day, `0..=86399`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DayMoment {
+    seconds: u32,
+}
+
+impl DayMoment {
+    pub const fn new(seconds: u32) -> Option<DayMoment> {
+        if seconds < 86_400 { Some(DayMoment { seconds }) } else { None }
+    }
+
+    pub const fn from_hms(hour: u8, minute: u8, second: u8) -> Option<DayMoment> {
+        if hour <= 23 && minute <= 59 && second <= 59 {
+            Some(DayMoment {
+                seconds: hour as u32 * 3600 + minute as u32 * 60 + second as u32,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// chrono wall-clock time → day moment; sub-second nanos are truncated.
+    pub fn from_naive_time(time: chrono::NaiveTime) -> Option<DayMoment> {
+        // chrono guarantees hour ≤ 23 / min ≤ 59 / sec ≤ 59, so the `u8`
+        // narrowing is an internal invariant, not an input check.
+        match (
+            u8::try_from(time.hour()),
+            u8::try_from(time.minute()),
+            u8::try_from(time.second()),
+        ) {
+            (Ok(h), Ok(m), Ok(s)) => DayMoment::from_hms(h, m, s),
+            _ => None,
+        }
+    }
+
+    pub const fn seconds(self) -> u32 {
+        self.seconds
+    }
+}
+
+/// Second-resolution selection plus the current interval's shape, consumed by
+/// the live countdown and progress gauge (spec M3 R1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NextPrayerAt {
+    pub name: PrayerName,
+    pub at: ClockTime,
+    /// Prayer whose interval `now` falls in (before Fajr: yesterday's Isha).
+    pub previous: PrayerName,
+    pub is_tomorrow: bool,
+    /// `1..=86400`
+    pub seconds_remaining: u32,
+    /// Seconds elapsed inside the current interval.
+    pub seconds_into_previous: u32,
+    /// Total length of the current interval; wraps midnight when needed.
+    pub interval_seconds: u32,
+}
+
+const SECONDS_PER_DAY: u32 = 86_400;
+
+/// Elapsed seconds from `from` to `to`, moving forward through the day.
+const fn wrapped_delta(to: u32, from: u32) -> u32 {
+    if to >= from { to - from } else { to + SECONDS_PER_DAY - from }
+}
+
+/// Same selection rule as [`next_prayer`] at second resolution: first prayer
+/// strictly after `now` (at `now == at` that prayer is current), post-Isha
+/// rolls to tomorrow's Fajr. Total; integer math only (ROLLOVER-CORRECT).
+pub const fn next_prayer_at(now: DayMoment, set: &PrayerSet) -> NextPrayerAt {
+    let now_s = now.seconds();
+    let mut previous = PrayerName::Isha;
+    let mut i = 0;
+    while i < PrayerName::ALL.len() {
+        let name = PrayerName::ALL[i];
+        let at = set.get(name);
+        if at.seconds() > now_s {
+            return NextPrayerAt {
+                name,
+                at,
+                previous,
+                is_tomorrow: false,
+                seconds_remaining: at.seconds() - now_s,
+                seconds_into_previous: wrapped_delta(now_s, set.get(previous).seconds()),
+                interval_seconds: wrapped_delta(
+                    at.seconds(),
+                    set.get(previous).seconds(),
+                ),
+            };
+        }
+        previous = name;
+        i += 1;
+    }
+    let isha = set.get(PrayerName::Isha);
+    let fajr = set.get(PrayerName::Fajr);
+    NextPrayerAt {
+        name: PrayerName::Fajr,
+        at: fajr,
+        previous: PrayerName::Isha,
+        is_tomorrow: true,
+        seconds_remaining: SECONDS_PER_DAY - now_s + fajr.seconds(),
+        seconds_into_previous: wrapped_delta(now_s, isha.seconds()),
+        interval_seconds: fajr.seconds() + SECONDS_PER_DAY - isha.seconds(),
     }
 }
