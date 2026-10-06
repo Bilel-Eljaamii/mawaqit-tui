@@ -151,3 +151,8 @@ mawaqit-api/fuzz/
 
 # Large presentation binary — kept locally, never shipped to GitHub
 docs/presentations/*.pptx
+
+
+# Added by cargo
+
+/target
