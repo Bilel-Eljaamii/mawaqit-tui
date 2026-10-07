@@ -155,5 +155,5 @@ fn format_hms(total: u32) -> String {
 }
 
 fn keys_hint() -> Paragraph<'static> {
-    Paragraph::new("q · quit    Ctrl-C · quit").style(theme::muted())
+    Paragraph::new("q · quit    s · search    Ctrl-C · quit").style(theme::muted())
 }

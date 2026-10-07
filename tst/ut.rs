@@ -281,8 +281,9 @@ fn rejects_overlong_slug() {
 mod app_model {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use mawaqit_tui::{
+        application::use_cases::AppError,
         domain::mosque::MosqueId,
-        ui::app::{AppEvent, AppModel, Boot, Command},
+        ui::app::{AppEvent, AppModel, Boot, Command, Screen, SearchState, TodayState},
     };
 
     use super::{fixed_now, readout};
@@ -296,27 +297,29 @@ mod app_model {
         // @tier ephemeral
         let id = MosqueId::parse("test-mosque").unwrap();
         let (model, commands) = AppModel::from_boot(Boot::Loading(id.clone()));
-        assert!(matches!(model.state, mawaqit_tui::ui::app::TodayState::Loading));
+        assert_eq!(model.screen, Screen::Today);
+        assert_eq!(model.today, TodayState::Loading);
         assert_eq!(commands, vec![Command::LoadToday(id)]);
     }
 
+    /// No saved mosque boots straight onto the search screen (spec M4 R1).
     #[test]
-    fn boot_no_mosque_has_no_commands() {
+    fn boot_no_mosque_lands_on_search_idle() {
         // @tier ephemeral
         let (model, commands) = AppModel::from_boot(Boot::NoMosque);
-        assert!(matches!(model.state, mawaqit_tui::ui::app::TodayState::NoMosque));
+        assert_eq!(model.screen, Screen::Search);
+        assert_eq!(model.search, SearchState::Idle);
+        assert_eq!(model.query, "");
         assert!(commands.is_empty());
     }
 
     #[test]
-    fn boot_failed_preserves_message() {
+    fn boot_failed_lands_on_today_with_message() {
         // @tier ephemeral
         let (model, commands) =
             AppModel::from_boot(Boot::Failed("config corrupt".into()));
-        assert!(matches!(
-            model.state,
-            mawaqit_tui::ui::app::TodayState::Failed(ref msg) if msg == "config corrupt"
-        ));
+        assert_eq!(model.screen, Screen::Today);
+        assert_eq!(model.today, TodayState::Failed("config corrupt".into()));
         assert!(commands.is_empty());
     }
 
@@ -326,7 +329,7 @@ mod app_model {
         let (mut model, _) =
             AppModel::from_boot(Boot::Loading(MosqueId::parse("test-mosque").unwrap()));
         model.update(AppEvent::TodayLoaded(Ok(readout())));
-        assert!(matches!(model.state, mawaqit_tui::ui::app::TodayState::Ready(_)));
+        assert_eq!(model.today, TodayState::Ready(readout()));
     }
 
     #[test]
@@ -334,12 +337,10 @@ mod app_model {
         // @tier ephemeral
         let (mut model, _) =
             AppModel::from_boot(Boot::Loading(MosqueId::parse("test-mosque").unwrap()));
-        model.update(AppEvent::TodayLoaded(Err(
-            mawaqit_tui::application::use_cases::AppError::Port(
-                mawaqit_tui::application::ports::PortError::Network("boom".into()),
-            ),
-        )));
-        assert!(matches!(model.state, mawaqit_tui::ui::app::TodayState::Failed(_)));
+        model.update(AppEvent::TodayLoaded(Err(AppError::Port(
+            mawaqit_tui::application::ports::PortError::Network("boom".into()),
+        ))));
+        assert_eq!(model.today, TodayState::Failed("network failure: boom".into()));
     }
 
     #[test]
@@ -361,41 +362,44 @@ mod app_model {
         assert!(model.should_quit);
     }
 
+    /// `q` quits on the Today screen; on Search it is a literal (spec M4 R2),
+    /// covered by `search_screen::bare_q_types_on_search_screen`.
     #[test]
-    fn q_quits() {
+    fn q_quits_on_today() {
         // @tier ephemeral
-        let (model, _) = AppModel::from_boot(Boot::NoMosque);
-        let mut model = model;
+        let (mut model, _) =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("test-mosque").unwrap()));
         model.update(key(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(model.should_quit);
     }
 
+    /// Ctrl-C quits even on the search screen, where `q` types.
     #[test]
-    fn ctrl_c_quits() {
+    fn ctrl_c_quits_on_search() {
         // @tier ephemeral
-        let (model, _) = AppModel::from_boot(Boot::NoMosque);
-        let mut model = model;
+        let (mut model, _) = AppModel::from_boot(Boot::NoMosque);
         model.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(model.should_quit);
     }
 
     #[test]
-    fn unknown_keys_are_inert() {
+    fn unknown_keys_are_inert_on_today() {
         // @tier ephemeral
-        let (model, _) = AppModel::from_boot(Boot::NoMosque);
-        let mut model = model;
+        let (mut model, _) =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("test-mosque").unwrap()));
         model.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
         model.update(key(KeyCode::Esc, KeyModifiers::NONE));
         // Plain `c` without CONTROL must NOT quit.
         model.update(key(KeyCode::Char('c'), KeyModifiers::NONE));
         assert!(!model.should_quit);
+        assert_eq!(model.screen, Screen::Today);
     }
 
     #[test]
-    fn shifted_and_control_q_are_inert() {
+    fn shifted_and_control_q_are_inert_on_today() {
         // @tier ephemeral
-        let (model, _) = AppModel::from_boot(Boot::NoMosque);
-        let mut model = model;
+        let (mut model, _) =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("test-mosque").unwrap()));
         model.update(key(KeyCode::Char('Q'), KeyModifiers::SHIFT));
         model.update(key(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(!model.should_quit);
@@ -404,8 +408,7 @@ mod app_model {
     #[test]
     fn ticks_advance() {
         // @tier ephemeral
-        let (model, _) = AppModel::from_boot(Boot::NoMosque);
-        let mut model = model;
+        let (mut model, _) = AppModel::from_boot(Boot::NoMosque);
         for _ in 0..3 {
             model.update(AppEvent::Tick(fixed_now()));
         }
@@ -476,11 +479,13 @@ mod placeholder_render {
         assert!(text.contains("Grande Mosquée"), "mosque name missing: {text:?}");
         assert!(text.contains("isha"), "prayer row missing: {text:?}");
         assert!(text.contains("in 02:00:00"), "countdown missing: {text:?}");
+        assert!(text.contains("s · search"), "search hint missing: {text:?}");
     }
 
-    /// The NoMosque boot state renders its guidance instead of panicking.
+    /// Boot without a mosque lands on the search screen (spec M4 R1/R5): the
+    /// query prompt and idle hint render instead of the old NoMosque notice.
     #[test]
-    fn no_mosque_screen_renders_headless() {
+    fn search_idle_screen_renders_headless() {
         // @tier ephemeral
         let backend = ratatui::backend::TestBackend::new(64, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -493,7 +498,8 @@ mod placeholder_render {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("no mosque"), "guidance missing: {text:?}");
+        assert!(text.contains('>'), "query prompt missing: {text:?}");
+        assert!(text.contains("type to search"), "idle hint missing: {text:?}");
     }
 }
 
@@ -605,5 +611,393 @@ mod preferred_set {
 
         let without = DailyTimes { adhan, iqama: None, shurouq: None };
         assert_eq!(without.preferred().get(PrayerName::Fajr), clock("05:00"));
+    }
+}
+
+// ---- M4: search screen, debounce epochs, selection flow (spec M4 R1–R3) ----
+
+mod search_screen {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use mawaqit_tui::{
+        application::{ports::PortError, use_cases::AppError},
+        domain::{
+            events::DomainEvent,
+            mosque::{MosqueId, MosqueSummary},
+        },
+        ui::app::{AppEvent, AppModel, Boot, Command, Screen, SearchState, TodayState},
+    };
+
+    use super::readout;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> AppEvent {
+        AppEvent::Key(KeyEvent::new(code, mods))
+    }
+
+    fn ch(c: char) -> AppEvent {
+        key(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn summaries() -> Vec<MosqueSummary> {
+        vec![
+            MosqueSummary {
+                id: MosqueId::parse("mosquee-de-paris").unwrap(),
+                name: "Grande Mosquée de Paris".into(),
+                place: Some("Paris".into()),
+            },
+            MosqueSummary {
+                id: MosqueId::parse("masjid-de-lyon").unwrap(),
+                name: "Mosquée de Lyon".into(),
+                place: None,
+            },
+        ]
+    }
+
+    fn search_model() -> AppModel {
+        AppModel::from_boot(Boot::NoMosque).0
+    }
+
+    /// Type "par": three keyed edits, epochs 1..=3.
+    fn type_par(model: &mut AppModel) -> Vec<Command> {
+        let mut commands = Vec::new();
+        for c in ['p', 'a', 'r'] {
+            commands.extend(model.update(ch(c)));
+        }
+        commands
+    }
+
+    /// Drive the model into `Results` with two items, cursor 0.
+    fn with_results() -> AppModel {
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        model.update(AppEvent::SearchLoaded(3, Ok(summaries())));
+        model
+    }
+
+    /// Drive the model into `Saving` the second summary.
+    fn saving_second() -> AppModel {
+        let mut model = with_results();
+        model.update(key(KeyCode::Down, KeyModifiers::NONE));
+        model.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        model
+    }
+
+    fn network_err() -> AppError {
+        AppError::Port(PortError::Network("dns down".into()))
+    }
+
+    #[test]
+    fn typing_appends_and_emits_epoched_commands() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let commands = type_par(&mut model);
+        assert_eq!(model.query, "par");
+        assert_eq!(
+            commands,
+            vec![
+                Command::Search { epoch: 1, query: "p".into() },
+                Command::Search { epoch: 2, query: "pa".into() },
+                Command::Search { epoch: 3, query: "par".into() },
+            ]
+        );
+        assert_eq!(model.search, SearchState::Querying { epoch: 3 });
+    }
+
+    #[test]
+    fn backspace_pops_char_and_reemits() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        let commands = model.update(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(model.query, "pa");
+        assert_eq!(commands, vec![Command::Search { epoch: 4, query: "pa".into() }]);
+        // Backspace on an empty query is inert.
+        let mut fresh = search_model();
+        let commands = fresh.update(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(commands.is_empty());
+        assert_eq!(fresh.search, SearchState::Idle);
+    }
+
+    /// A query that only trims to empty never reaches the port (mirrors the
+    /// `SearchMosques` short-circuit).
+    #[test]
+    fn trim_empty_query_returns_to_idle_without_command() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let commands = model.update(ch(' '));
+        assert_eq!(model.query, " ");
+        assert_eq!(model.search, SearchState::Idle);
+        assert!(commands.is_empty());
+
+        // Editing back to a non-trim-empty query resumes querying.
+        model.update(ch('a'));
+        assert_eq!(model.search, SearchState::Querying { epoch: 2 });
+    }
+
+    #[test]
+    fn search_loaded_ok_matching_epoch_shows_results() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        model.update(AppEvent::SearchLoaded(3, Ok(summaries())));
+        assert_eq!(
+            model.search,
+            SearchState::Results { epoch: 3, items: summaries(), cursor: 0 }
+        );
+    }
+
+    /// The screen belongs to the newest query: a stale response is discarded
+    /// (spec M4 R2).
+    #[test]
+    fn stale_search_results_are_discarded() {
+        // @tier ephemeral
+        let mut model = search_model();
+        model.update(ch('p')); // epoch 1
+        model.update(ch('a')); // epoch 2
+        model.update(AppEvent::SearchLoaded(1, Ok(summaries())));
+        assert_eq!(model.search, SearchState::Querying { epoch: 2 });
+    }
+
+    #[test]
+    fn search_error_shows_message() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        model.update(AppEvent::SearchLoaded(3, Err(network_err())));
+        assert_eq!(model.search, SearchState::Failed("network failure: dns down".into()));
+    }
+
+    /// A response arriving while `Idle` (e.g. after the query was cleared) is
+    /// stale by definition and must not resurrect results.
+    #[test]
+    fn response_while_idle_is_discarded() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        model.update(key(KeyCode::Backspace, KeyModifiers::NONE)); // "pa"
+        model.update(key(KeyCode::Backspace, KeyModifiers::NONE)); // "p"
+        model.update(key(KeyCode::Backspace, KeyModifiers::NONE)); // ""
+        assert_eq!(model.search, SearchState::Idle);
+        model.update(AppEvent::SearchLoaded(3, Ok(summaries())));
+        assert_eq!(model.search, SearchState::Idle);
+    }
+
+    #[test]
+    fn cursor_navigation_clamps_at_both_ends() {
+        // @tier ephemeral
+        let mut model = with_results();
+        for _ in 0..4 {
+            model.update(key(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(model.search.cursor(), Some(1));
+        for _ in 0..3 {
+            model.update(key(KeyCode::Up, KeyModifiers::NONE));
+        }
+        assert_eq!(model.search.cursor(), Some(0));
+    }
+
+    /// Enter selects the cursor row and asks for persistence; the domain
+    /// event fires only once the save succeeded (spec M4 R3).
+    #[test]
+    fn enter_on_results_saves_cursor_row() {
+        // @tier ephemeral
+        let mut model = with_results();
+        model.update(key(KeyCode::Down, KeyModifiers::NONE));
+        let commands = model.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let expected = summaries().remove(1);
+        assert_eq!(commands, vec![Command::SaveSelection(expected.clone())]);
+        assert_eq!(model.search, SearchState::Saving(expected));
+        assert!(model.take_events().is_empty());
+    }
+
+    #[test]
+    fn enter_is_inert_without_selectable_results() {
+        // @tier ephemeral
+        // Idle
+        let mut model = search_model();
+        assert!(model.update(key(KeyCode::Enter, KeyModifiers::NONE)).is_empty());
+        // Querying
+        let _ = type_par(&mut model);
+        assert!(model.update(key(KeyCode::Enter, KeyModifiers::NONE)).is_empty());
+        // Failed
+        model.update(AppEvent::SearchLoaded(3, Err(network_err())));
+        assert!(model.update(key(KeyCode::Enter, KeyModifiers::NONE)).is_empty());
+        // Results, but empty (fresh model — the failed state above no longer
+        // accepts epoch 3 responses, by design).
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        model.update(AppEvent::SearchLoaded(3, Ok(Vec::new())));
+        assert_eq!(
+            model.search,
+            SearchState::Results { epoch: 3, items: vec![], cursor: 0 }
+        );
+        assert!(model.update(key(KeyCode::Enter, KeyModifiers::NONE)).is_empty());
+        // Saving (double-Enter guard)
+        let mut model = saving_second();
+        assert!(model.update(key(KeyCode::Enter, KeyModifiers::NONE)).is_empty());
+    }
+
+    #[test]
+    fn selection_saved_ok_jumps_to_today_loading() {
+        // @tier ephemeral
+        let mut model = saving_second();
+        let id = summaries().remove(1).id;
+        let commands = model.update(AppEvent::SelectionSaved(Ok(())));
+        assert_eq!(model.screen, Screen::Today);
+        assert_eq!(model.today, TodayState::Loading);
+        assert_eq!(commands, vec![Command::LoadToday(id.clone())]);
+        assert_eq!(model.take_events(), vec![DomainEvent::MosqueSelected { id }]);
+        // Events are drained, not cloned.
+        assert!(model.take_events().is_empty());
+    }
+
+    /// A failed disk write shows the reason verbatim, keeps the selection,
+    /// and Enter retries (spec M4 R3 — HONESTY).
+    #[test]
+    fn selection_saved_err_keeps_retry_path() {
+        // @tier ephemeral
+        let mut model = saving_second();
+        let summary = summaries().remove(1);
+        model.update(AppEvent::SelectionSaved(Err(AppError::Settings(
+            mawaqit_tui::application::ports::SettingsError::Io("disk full".into()),
+        ))));
+        assert_eq!(
+            model.search,
+            SearchState::SaveFailed {
+                summary: summary.clone(),
+                reason: "settings io failure: disk full".into(),
+            }
+        );
+        let commands = model.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(commands, vec![Command::SaveSelection(summary.clone())]);
+        assert_eq!(model.search, SearchState::Saving(summary));
+    }
+
+    #[test]
+    fn esc_returns_to_today_preserving_its_state() {
+        // @tier ephemeral
+        // From a Ready Today.
+        let mut model =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("m").unwrap())).0;
+        model.update(AppEvent::TodayLoaded(Ok(readout())));
+        model.update(ch('s'));
+        assert_eq!(model.screen, Screen::Search);
+        model.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(model.screen, Screen::Today);
+        assert_eq!(model.today, TodayState::Ready(readout()));
+
+        // From a boot-time Failed Today.
+        let mut model = AppModel::from_boot(Boot::Failed("corrupt".into())).0;
+        model.update(ch('s'));
+        model.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(model.today, TodayState::Failed("corrupt".into()));
+    }
+
+    #[test]
+    fn s_opens_search_from_any_today_state() {
+        // @tier ephemeral
+        for boot in
+            [Boot::Loading(MosqueId::parse("m").unwrap()), Boot::Failed("corrupt".into())]
+        {
+            let (mut model, pending) = AppModel::from_boot(boot);
+            let _ = pending; // LoadToday commands belong to the runtime
+            model.update(ch('s'));
+            assert_eq!(model.screen, Screen::Search);
+        }
+    }
+
+    /// Reopening search keeps the previous query and results (spec M4 R1).
+    #[test]
+    fn s_reopens_preserve_previous_results() {
+        // @tier ephemeral
+        let mut model = with_results();
+        model.update(ch('s')); // 's' while already searching types into query!
+        assert_eq!(model.query, "pars");
+        // Proper round-trip: back to Today, then re-open.
+        let mut model = with_results();
+        model.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        model.update(ch('s'));
+        assert_eq!(model.screen, Screen::Search);
+        assert_eq!(model.search.cursor(), Some(0));
+        assert!(matches!(model.search, SearchState::Results { .. }));
+    }
+
+    #[test]
+    fn bare_q_types_on_search_screen() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let commands = model.update(ch('q'));
+        assert!(!model.should_quit);
+        assert_eq!(model.query, "q");
+        assert_eq!(commands, vec![Command::Search { epoch: 1, query: "q".into() }]);
+    }
+
+    #[test]
+    fn control_chars_do_not_enter_the_query() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let commands = model.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(model.query, "");
+        assert!(commands.is_empty());
+        assert_eq!(model.search, SearchState::Idle);
+    }
+
+    // -- render smokes (TestBackend) ---------------------------------------
+
+    fn render(model: &AppModel) -> String {
+        let backend = ratatui::backend::TestBackend::new(64, 14);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| mawaqit_tui::ui::draw::draw(frame, model)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn search_results_render_names_and_count() {
+        // @tier ephemeral
+        let text = render(&with_results());
+        assert!(text.contains("par"), "query missing: {text:?}");
+        assert!(text.contains("2 found"), "result count missing: {text:?}");
+        assert!(text.contains("Grande Mosquée de Paris"), "row missing: {text:?}");
+        assert!(text.contains("Mosquée de Lyon"), "row missing: {text:?}");
+        assert!(text.contains("Enter · select"), "footer missing: {text:?}");
+    }
+
+    #[test]
+    fn empty_results_render_no_mosques_found() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        model.update(AppEvent::SearchLoaded(3, Ok(Vec::new())));
+        let text = render(&model);
+        assert!(text.contains("no mosques found"), "empty state missing: {text:?}");
+    }
+
+    #[test]
+    fn querying_renders_searching_hint() {
+        // @tier ephemeral
+        let mut model = search_model();
+        let _ = type_par(&mut model);
+        let text = render(&model);
+        assert!(text.contains("searching"), "hint missing: {text:?}");
+    }
+
+    #[test]
+    fn save_failed_renders_reason_and_retry_hint() {
+        // @tier ephemeral
+        let mut model = saving_second();
+        model.update(AppEvent::SelectionSaved(Err(AppError::Settings(
+            mawaqit_tui::application::ports::SettingsError::Io("disk full".into()),
+        ))));
+        let text = render(&model);
+        assert!(
+            text.contains("settings io failure: disk full"),
+            "verbatim reason missing: {text:?}"
+        );
+        assert!(text.contains("retry"), "retry hint missing: {text:?}");
     }
 }

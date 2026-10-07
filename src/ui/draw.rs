@@ -1,4 +1,4 @@
-//! Screen dispatch on the today lifecycle (spec M3 R6).
+//! Screen dispatch (spec M3 R6, spec M4 R1/R5).
 
 use ratatui::{
     Frame,
@@ -6,22 +6,23 @@ use ratatui::{
 };
 
 use crate::ui::{
-    app::{AppModel, TodayState},
+    app::{AppModel, Screen, TodayState},
     theme, views,
 };
 
 pub fn draw(frame: &mut Frame, model: &AppModel) {
-    match &model.state {
-        TodayState::Ready(readout) => views::today::render(frame, model, readout),
-        TodayState::NoMosque => message(
-            frame,
-            "no mosque configured",
-            "run `mawaqit-tui --mosque <slug>` — interactive search lands in M4",
-        ),
-        TodayState::Loading => message(frame, "loading today's times…", ""),
-        TodayState::Failed(reason) => {
-            message(frame, "could not load today's times", reason)
-        }
+    match model.screen {
+        Screen::Today => match &model.today {
+            TodayState::Ready(readout) => views::today::render(frame, model, readout),
+            TodayState::NoMosque => {
+                message(frame, "no mosque selected", "press s to search")
+            }
+            TodayState::Loading => message(frame, "loading today's times…", ""),
+            TodayState::Failed(reason) => {
+                message(frame, "could not load today's times", reason)
+            }
+        },
+        Screen::Search => views::search::render(frame, model),
     }
 }
 

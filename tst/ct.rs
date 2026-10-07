@@ -224,6 +224,20 @@ fn corrupt_settings_reported_not_swallowed() {
     assert!(matches!(store.load(), Err(SettingsError::Corrupt)));
 }
 
+/// Platforms without a config dir get an honest failure, never a silent
+/// pretend-save (spec M4 R4).
+#[test]
+fn null_settings_fails_honestly() {
+    // @tier durable
+    use mawaqit_tui::infrastructure::settings::NullSettings;
+    let store = NullSettings;
+    assert!(matches!(store.load(), Err(SettingsError::Io(_))));
+    assert!(matches!(
+        store.save(&summary("any-slug", "Any", None)),
+        Err(SettingsError::Io(_))
+    ));
+}
+
 // ---- mapping fixtures (ephemeral — crate wire shapes) -----------------------
 
 fn api_prayer_times(dhuhr: &str) -> mawaqit_api::DailyPrayerTimes {

@@ -1,12 +1,14 @@
-//! Binary entry point — composition root (ADR-0001, spec M3 R5).
+//! Binary entry point — composition root (ADR-0001, spec M3 R5, spec M4 R4).
 
 use std::sync::Arc;
 
 use mawaqit_tui::{
-    application::ports::SettingsStore,
+    application::ports::{Clock, MosqueDirectory, SettingsStore, TimesService},
     domain::mosque::MosqueId,
     infrastructure::{
-        clock::SystemClock, mawaqit::MawaqitAdapter, settings::TomlSettings,
+        clock::SystemClock,
+        mawaqit::MawaqitAdapter,
+        settings::{NullSettings, TomlSettings},
     },
     runtime::{self, Runtime},
     ui::app::Boot,
@@ -16,20 +18,51 @@ const USAGE: &str = "usage: mawaqit-tui [--mosque <slug>]";
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let boot = match parse_cli() {
-        Some(id) => Boot::Loading(id),
-        None => match TomlSettings::default_path() {
-            Some(path) => match TomlSettings::new(path).load() {
-                Ok(Some(selected)) => Boot::Loading(selected.id),
-                Ok(None) => Boot::NoMosque,
-                Err(err) => Boot::Failed(err.to_string()),
-            },
-            None => Boot::Failed("no config directory on this platform".to_owned()),
-        },
-    };
-    let deps =
-        Runtime { times: Arc::new(MawaqitAdapter::new()), clock: Arc::new(SystemClock) };
-    runtime::run(deps, boot).await
+    let cli_mosque = parse_cli();
+    match TomlSettings::default_path() {
+        Some(path) => {
+            let settings = Arc::new(TomlSettings::new(path));
+            let boot = match cli_mosque {
+                Some(id) => Boot::Loading(id),
+                None => match settings.load() {
+                    Ok(Some(selected)) => Boot::Loading(selected.id),
+                    Ok(None) => Boot::NoMosque,
+                    Err(err) => Boot::Failed(err.to_string()),
+                },
+            };
+            start(Arc::new(MawaqitAdapter::new()), Arc::new(SystemClock), settings, boot)
+                .await
+        }
+        None => {
+            let boot = match cli_mosque {
+                Some(id) => Boot::Loading(id),
+                None => Boot::Failed("no config directory on this platform".to_owned()),
+            };
+            start(
+                Arc::new(MawaqitAdapter::new()),
+                Arc::new(SystemClock),
+                Arc::new(NullSettings),
+                boot,
+            )
+            .await
+        }
+    }
+}
+
+/// Monomorphized start so the with/without-config-dir compositions can share
+/// the fully generic runtime (no `dyn` — ADR-0002 §1).
+async fn start<T, C, S>(
+    times: Arc<T>,
+    clock: Arc<C>,
+    settings: Arc<S>,
+    boot: Boot,
+) -> std::io::Result<()>
+where
+    T: TimesService + MosqueDirectory + Send + Sync + 'static,
+    C: Clock + Send + Sync + 'static,
+    S: SettingsStore + Send + Sync + 'static,
+{
+    runtime::run(Runtime { times, clock, settings }, boot).await
 }
 
 /// `--mosque <slug>` overrides the saved selection for this session; invalid

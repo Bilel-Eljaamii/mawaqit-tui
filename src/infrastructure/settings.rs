@@ -29,6 +29,22 @@ pub struct TomlSettings {
     path: PathBuf,
 }
 
+/// Placeholder store for platforms without a config directory (spec M4 R4):
+/// every operation fails with an honest error the UI can surface — it never
+/// pretends a save succeeded.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NullSettings;
+
+impl SettingsStore for NullSettings {
+    fn load(&self) -> Result<Option<MosqueSummary>, SettingsError> {
+        Err(SettingsError::Io("no config directory on this platform".into()))
+    }
+
+    fn save(&self, _selection: &MosqueSummary) -> Result<(), SettingsError> {
+        Err(SettingsError::Io("no config directory on this platform".into()))
+    }
+}
+
 impl TomlSettings {
     pub fn new(path: impl Into<PathBuf>) -> TomlSettings {
         TomlSettings { path: path.into() }
