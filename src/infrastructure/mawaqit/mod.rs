@@ -93,8 +93,14 @@ impl TimesService for MawaqitAdapter {
         id: &MosqueId,
         month: u32,
     ) -> Result<MonthReadout, PortError> {
-        let (adhan, iqama) =
-            tokio::join!(self.month_api(id, month), self.month_iqama_api(id, month));
-        mapping::map_month(&adhan?, &iqama?)
+        // conf rides along for the tz (spec M5 R1); it is client-cached, so
+        // this is one network round-trip after the first call.
+        let (conf, adhan, iqama) = tokio::join!(
+            self.conf(id),
+            self.month_api(id, month),
+            self.month_iqama_api(id, month)
+        );
+        let conf = conf?;
+        mapping::map_month(&adhan?, &iqama?, &conf)
     }
 }

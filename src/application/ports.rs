@@ -62,9 +62,12 @@ pub struct MonthDay {
 }
 
 /// A month of rows; dropped days are surfaced verbatim (honesty, ADR-0002 §4).
+/// The tz rides along (spec M5 R1): the month view anchors "today" in the
+/// mosque calendar, not the viewer's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonthReadout {
     pub month: u32,
+    pub tz: TzSource,
     pub days: Vec<MonthDay>,
     pub dropped: Vec<u32>,
 }

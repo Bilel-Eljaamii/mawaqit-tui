@@ -1001,3 +1001,332 @@ mod search_screen {
         assert!(text.contains("retry"), "retry hint missing: {text:?}");
     }
 }
+
+// ---- M5: month screen, in-session cache, dropped days (spec M5 R3–R5) ------
+
+mod month_screen {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use mawaqit_tui::{
+        application::{
+            ports::{MonthDay, MonthReadout, PortError, TzSource},
+            use_cases::AppError,
+        },
+        domain::mosque::{MosqueId, MosqueSummary},
+        ui::app::{AppEvent, AppModel, Boot, Command, MonthState, Screen, TodayState},
+    };
+
+    use super::{fixed_now, readout, set};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> AppEvent {
+        AppEvent::Key(KeyEvent::new(code, mods))
+    }
+
+    fn ch(c: char) -> AppEvent {
+        key(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn mosque_id() -> MosqueId {
+        MosqueId::parse("test-mosque").unwrap()
+    }
+
+    /// Days 1..=10, all with iqama; day 15 was dropped by the source. The
+    /// payload month is a parameter: the model rejects mismatched months.
+    fn month_readout(month: u32) -> MonthReadout {
+        let adhan = set(["05:00", "12:30", "15:45", "18:20", "20:00"]);
+        let iqama = set(["05:15", "12:45", "16:00", "18:35", "20:15"]);
+        MonthReadout {
+            month,
+            tz: TzSource::Mosque(chrono_tz::Tz::Europe__Paris),
+            days: (1..=10)
+                .map(|day| MonthDay { day, adhan, iqama: Some(iqama), shurouq: None })
+                .collect(),
+            dropped: vec![15],
+        }
+    }
+
+    /// A Today screen that is Ready, ticked at the fixed instant (Paris:
+    /// 2026-10-06 14:00 → month 10), with the month screen opened.
+    fn opened_month() -> (AppModel, MosqueId) {
+        let id = mosque_id();
+        let mut model = AppModel::from_boot(Boot::Loading(id.clone())).0;
+        model.update(AppEvent::TodayLoaded(Ok(readout())));
+        model.update(AppEvent::Tick(fixed_now()));
+        let commands = model.update(ch('m'));
+        assert_eq!(
+            commands,
+            vec![Command::LoadMonth { id: id.clone(), month: 10 }],
+            "setup must open the month screen"
+        );
+        (model, id)
+    }
+
+    /// `opened_month` with the October readout delivered (Ready, cursor on
+    /// day 6 = index 5).
+    fn ready_month() -> (AppModel, MosqueId) {
+        let (mut model, id) = opened_month();
+        model.update(AppEvent::MonthLoaded {
+            id: id.clone(),
+            month: 10,
+            result: Ok(month_readout(10)),
+        });
+        (model, id)
+    }
+
+    #[test]
+    fn m_is_inert_until_today_is_ready() {
+        // @tier ephemeral
+        let id = mosque_id();
+        // Loading and Failed boots: no tz anchor exists yet.
+        for boot in [Boot::Loading(id), Boot::Failed("corrupt".into())] {
+            let (mut model, _) = AppModel::from_boot(boot);
+            assert!(model.update(ch('m')).is_empty());
+            assert_eq!(model.screen, Screen::Today);
+        }
+    }
+
+    /// Even Ready is not enough without a tick — the anchor instant arrives
+    /// only via `Tick` (no hidden clocks).
+    #[test]
+    fn m_without_a_tick_is_inert() {
+        // @tier ephemeral
+        let mut model = AppModel::from_boot(Boot::Loading(mosque_id())).0;
+        model.update(AppEvent::TodayLoaded(Ok(readout())));
+        assert!(model.update(ch('m')).is_empty());
+    }
+
+    #[test]
+    fn m_opens_month_anchor_to_mosque_tz() {
+        // @tier ephemeral
+        let id = mosque_id();
+        let mut model = AppModel::from_boot(Boot::Loading(id.clone())).0;
+        model.update(AppEvent::TodayLoaded(Ok(readout())));
+        model.update(AppEvent::Tick(fixed_now()));
+        let commands = model.update(ch('m'));
+        assert_eq!(commands, vec![Command::LoadMonth { id: id.clone(), month: 10 }]);
+        assert_eq!(model.screen, Screen::Month);
+        assert_eq!(model.month, MonthState::Loading { month: 10 });
+        assert_eq!(model.selected, Some(id));
+    }
+
+    #[test]
+    fn month_loaded_caches_and_cursors_today() {
+        // @tier ephemeral
+        let (mut model, id) = opened_month();
+        model.update(AppEvent::MonthLoaded {
+            id: id.clone(),
+            month: 10,
+            result: Ok(month_readout(10)),
+        });
+        assert!(matches!(model.month, MonthState::Ready { month: 10, cursor: 5, .. }));
+
+        // Away and back: the revisit must not emit a command (cache hit).
+        let commands = model.update(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(commands, vec![Command::LoadMonth { id: id.clone(), month: 9 }]);
+        model.update(AppEvent::MonthLoaded {
+            id: id.clone(),
+            month: 9,
+            result: Ok(month_readout(10)),
+        });
+        let commands = model.update(key(KeyCode::Right, KeyModifiers::NONE));
+        assert!(commands.is_empty(), "cached month must not refetch: {commands:?}");
+        assert!(matches!(model.month, MonthState::Ready { month: 10, .. }));
+    }
+
+    #[test]
+    fn navigation_wraps_december_to_january() {
+        // @tier ephemeral
+        let (mut model, id) = ready_month();
+        for expected in [11, 12, 1] {
+            let commands = model.update(key(KeyCode::Right, KeyModifiers::NONE));
+            assert_eq!(
+                commands,
+                vec![Command::LoadMonth { id: id.clone(), month: expected }]
+            );
+            model.update(AppEvent::MonthLoaded {
+                id: id.clone(),
+                month: expected,
+                result: Ok(month_readout(expected)),
+            });
+        }
+        // 12 → 1 wrap happened above; moving on from January must reach the
+        // uncached February (December itself is cached now — see the cache
+        // test for the no-refetch guarantee).
+        let commands = model.update(key(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(commands, vec![Command::LoadMonth { id, month: 2 }]);
+    }
+
+    /// A response for a month the user has already navigated away from is
+    /// discarded (same staleness rule as search).
+    #[test]
+    fn stale_month_result_discarded() {
+        // @tier ephemeral
+        let (mut model, id) = opened_month();
+        model.update(key(KeyCode::Right, KeyModifiers::NONE)); // → Loading{11}
+        model.update(AppEvent::MonthLoaded {
+            id: id.clone(),
+            month: 10,
+            result: Ok(month_readout(10)),
+        });
+        assert_eq!(model.month, MonthState::Loading { month: 11 });
+    }
+
+    #[test]
+    fn month_loaded_for_other_mosque_discarded() {
+        // @tier ephemeral
+        let (mut model, _) = opened_month();
+        let stranger = MosqueId::parse("other-mosque").unwrap();
+        model.update(AppEvent::MonthLoaded {
+            id: stranger,
+            month: 10,
+            result: Ok(month_readout(10)),
+        });
+        assert_eq!(model.month, MonthState::Loading { month: 10 });
+    }
+
+    /// A source that quietly returns different month data must be failed
+    /// loudly, never relabelled with the requested month (HONESTY).
+    #[test]
+    fn month_mismatch_from_source_fails_loudly() {
+        // @tier ephemeral
+        let (mut model, id) = opened_month();
+        model.update(AppEvent::MonthLoaded {
+            id: id.clone(),
+            month: 10,
+            result: Ok(month_readout(11)),
+        });
+        assert!(matches!(model.month, MonthState::Failed { month: 10, .. }));
+        // Nothing was cached under the request: moving re-fetches.
+        let commands = model.update(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(commands, vec![Command::LoadMonth { id, month: 9 }]);
+    }
+
+    #[test]
+    fn month_loaded_err_shows_verbatim_and_navigates_on() {
+        // @tier ephemeral
+        let (mut model, id) = opened_month();
+        model.update(AppEvent::MonthLoaded {
+            id: id.clone(),
+            month: 10,
+            result: Err(AppError::Port(PortError::Network("boom".into()))),
+        });
+        assert_eq!(
+            model.month,
+            MonthState::Failed { month: 10, reason: "network failure: boom".into() }
+        );
+        // Navigation works from Failed: retrying is just moving again.
+        let commands = model.update(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(commands, vec![Command::LoadMonth { id, month: 9 }]);
+    }
+
+    #[test]
+    fn cursor_clamps_and_jk_work() {
+        // @tier ephemeral
+        let (mut model, _) = ready_month();
+        for _ in 0..12 {
+            model.update(key(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(matches!(model.month, MonthState::Ready { cursor: 9, .. }));
+        model.update(ch('j'));
+        assert!(matches!(model.month, MonthState::Ready { cursor: 9, .. }));
+        model.update(key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(model.month, MonthState::Ready { cursor: 8, .. }));
+        model.update(ch('k'));
+        assert!(matches!(model.month, MonthState::Ready { cursor: 7, .. }));
+        for _ in 0..8 {
+            model.update(key(KeyCode::Up, KeyModifiers::NONE));
+        }
+        assert!(matches!(model.month, MonthState::Ready { cursor: 0, .. }));
+    }
+
+    #[test]
+    fn esc_s_q_keys_on_month_screen() {
+        // @tier ephemeral
+        let (mut model, _) = ready_month();
+        // Esc → Today, preserving its Ready state.
+        model.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(model.screen, Screen::Today);
+        assert!(matches!(model.today, TodayState::Ready(_)));
+        // Back into the month; `s` opens Search from there.
+        model.update(ch('m'));
+        model.update(ch('s'));
+        assert_eq!(model.screen, Screen::Search);
+        // Bare `q` quits on the month screen (it is not a typing screen).
+        let (mut model, _) = ready_month();
+        model.update(key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(model.should_quit);
+    }
+
+    #[test]
+    fn selection_records_selected_mosque() {
+        // @tier ephemeral
+        let mut model =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("boot-mosque").unwrap())).0;
+        let summary = MosqueSummary {
+            id: MosqueId::parse("new-mosque").unwrap(),
+            name: "New".into(),
+            place: None,
+        };
+        model.update(ch('s'));
+        model.update(ch('x')); // epoch 1
+        model.update(AppEvent::SearchLoaded(1, Ok(vec![summary.clone()])));
+        model.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        model.update(AppEvent::SelectionSaved(Ok(())));
+        assert_eq!(model.selected, Some(summary.id));
+    }
+
+    // -- render smokes (TestBackend) ---------------------------------------
+
+    fn render(model: &AppModel) -> String {
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| mawaqit_tui::ui::draw::draw(frame, model)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn month_renders_headers_iqama_and_dropped_marker() {
+        // @tier ephemeral
+        let (model, _) = ready_month();
+        let text = render(&model);
+        assert!(text.contains("fajr"), "adhan header missing: {text:?}");
+        assert!(text.contains("i-fjr"), "iqama header missing: {text:?}");
+        assert!(text.contains("October"), "month name missing: {text:?}");
+        assert!(text.contains("dropped"), "dropped info missing: {text:?}");
+        assert!(text.contains("Esc · today"), "footer missing: {text:?}");
+    }
+
+    /// A month without iqama must not render empty iqama columns.
+    #[test]
+    fn month_without_iqama_hides_iqama_columns() {
+        // @tier ephemeral
+        let (mut model, id) = opened_month();
+        let mut readout = month_readout(10);
+        for day in &mut readout.days {
+            day.iqama = None;
+        }
+        model.update(AppEvent::MonthLoaded { id, month: 10, result: Ok(readout) });
+        let text = render(&model);
+        assert!(text.contains("fajr"), "adhan header missing: {text:?}");
+        assert!(!text.contains("i-fjr"), "iqama columns must be hidden: {text:?}");
+    }
+
+    /// Dropped days are explicit dimmed rows, not silent gaps (HONESTY).
+    #[test]
+    fn dropped_days_render_between_present_days() {
+        // @tier ephemeral
+        let (mut model, id) = opened_month();
+        let mut readout = month_readout(10);
+        readout.days.truncate(2); // days 1–2 present, day 3 dropped
+        readout.dropped = vec![3];
+        model.update(AppEvent::MonthLoaded { id, month: 10, result: Ok(readout) });
+        let text = render(&model);
+        assert!(text.contains('·'), "dropped-day marker missing: {text:?}");
+        assert!(text.contains("dropped: 3"), "dropped list missing: {text:?}");
+    }
+}

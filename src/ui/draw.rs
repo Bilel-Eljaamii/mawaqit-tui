@@ -1,4 +1,4 @@
-//! Screen dispatch (spec M3 R6, spec M4 R1/R5).
+//! Screen dispatch (spec M3 R6, spec M4 R1/R5, spec M5 R4/R5).
 
 use ratatui::{
     Frame,
@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use crate::ui::{
-    app::{AppModel, Screen, TodayState},
+    app::{AppModel, MonthState, Screen, TodayState},
     theme, views,
 };
 
@@ -23,6 +23,13 @@ pub fn draw(frame: &mut Frame, model: &AppModel) {
             }
         },
         Screen::Search => views::search::render(frame, model),
+        Screen::Month => match &model.month {
+            MonthState::Loading { .. } => message(frame, "loading this month…", ""),
+            MonthState::Ready { .. } => views::month::render(frame, model),
+            MonthState::Failed { reason, .. } => {
+                message(frame, "could not load this month", reason)
+            }
+        },
     }
 }
 

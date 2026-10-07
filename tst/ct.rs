@@ -63,6 +63,7 @@ fn today_fixture() -> TodayReadout {
 fn month_fixture() -> MonthReadout {
     MonthReadout {
         month: 10,
+        tz: TzSource::Mosque(chrono_tz::Tz::Europe__Paris),
         days: vec![MonthDay {
             day: 1,
             adhan: PrayerSet::new(
@@ -358,7 +359,8 @@ fn month_merge_surfaces_dropped_days() {
     };
     let iqama_month =
         MonthIqamaTimes { month: 10, days: vec![month_iqama_day(1)], dropped: vec![] };
-    let readout = map_month(&adhan_month, &iqama_month).unwrap();
+    let conf = conf_fixture(Some("Europe/Paris"), None);
+    let readout = map_month(&adhan_month, &iqama_month, &conf).unwrap();
     assert_eq!(readout.dropped, vec![15]);
     assert_eq!(readout.days.len(), 2);
     assert!(readout.days[0].iqama.is_some());
@@ -374,10 +376,28 @@ fn orphan_iqama_day_is_invalid_data() {
         days: vec![month_iqama_day(1), month_iqama_day(9)],
         dropped: vec![],
     };
+    let conf = conf_fixture(Some("Europe/Paris"), None);
     assert!(matches!(
-        map_month(&adhan_month, &iqama_month),
+        map_month(&adhan_month, &iqama_month, &conf),
         Err(PortError::InvalidData(_))
     ));
+}
+
+/// The month view anchors "today" in the mosque timezone (TZ-TRUTH), so the
+/// readout must carry the same tz rule as the today view.
+#[test]
+fn month_maps_tz_from_conf() {
+    // @tier durable
+    let adhan_month = MonthTimes { month: 10, days: vec![month_day(1)], dropped: vec![] };
+    let iqama_month = MonthIqamaTimes { month: 10, days: vec![], dropped: vec![] };
+
+    let paris = conf_fixture(Some("Europe/Paris"), None);
+    let readout = map_month(&adhan_month, &iqama_month, &paris).unwrap();
+    assert_eq!(readout.tz, TzSource::Mosque(chrono_tz::Tz::Europe__Paris));
+
+    let absent = conf_fixture(None, None);
+    let fallback = map_month(&adhan_month, &iqama_month, &absent).unwrap();
+    assert_eq!(fallback.tz, TzSource::Local);
 }
 
 #[test]
@@ -460,6 +480,34 @@ mod wall_clock {
         let expected =
             DayMoment::from_naive_time(instant.with_timezone(&chrono::Local).time());
         assert_eq!(day_moment_from_utc(instant, TzSource::Local), expected.unwrap());
+    }
+
+    /// `date_in_utc` is the date twin of `day_moment_from_utc` (spec M5 R2):
+    /// the month anchor must follow the mosque calendar, not the agent's UTC
+    /// wall clock.
+    #[test]
+    fn date_in_mosque_tz_winter_summer_and_dst() {
+        // @tier durable
+        use mawaqit_tui::application::clock::date_in_utc;
+        let paris = TzSource::Mosque(Tz::Europe__Paris);
+        // Summer (CEST): 2026-10-06 22:30 UTC is already Oct 7 in Paris.
+        let late = Utc.with_ymd_and_hms(2026, 10, 6, 22, 30, 0).unwrap();
+        assert_eq!(date_in_utc(late, paris).to_string(), "2026-10-07");
+        // Winter (CET): 2026-01-15 10:30 UTC is still Jan 15 in Paris.
+        let winter = Utc.with_ymd_and_hms(2026, 1, 15, 10, 30, 0).unwrap();
+        assert_eq!(date_in_utc(winter, paris).to_string(), "2026-01-15");
+        // DST spring transition: 2026-03-29 01:30 UTC is 03:30 CEST.
+        let during = Utc.with_ymd_and_hms(2026, 3, 29, 1, 30, 0).unwrap();
+        assert_eq!(date_in_utc(during, paris).to_string(), "2026-03-29");
+        // Year boundary: 2026-12-31 23:30 UTC is 2027-01-01 00:30 in Paris.
+        let new_year = Utc.with_ymd_and_hms(2026, 12, 31, 23, 30, 0).unwrap();
+        assert_eq!(date_in_utc(new_year, paris).to_string(), "2027-01-01");
+        // Local fallback mirrors the system zone.
+        let instant = Utc.with_ymd_and_hms(2026, 10, 6, 10, 30, 0).unwrap();
+        assert_eq!(
+            date_in_utc(instant, TzSource::Local),
+            instant.with_timezone(&chrono::Local).date_naive()
+        );
     }
 }
 

@@ -1,13 +1,20 @@
-//! AppModel — Elm-style state machine (ADR-0001 §2, spec M3 R4, spec M4 R1–R3).
+//! AppModel — Elm-style state machine (ADR-0001 §2, spec M3 R4, spec M4 R1–R3,
+//! spec M5 R3–R4).
 //!
 //! Transitions are pure: time arrives inside `Tick` (never read from a clock
 //! here), side effects leave as `Command`s, results come back as events.
 
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+use chrono::{DateTime, Datelike, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    application::{ports::TodayReadout, use_cases::AppError},
+    application::{
+        clock::date_in_utc,
+        ports::{MonthReadout, TodayReadout},
+        use_cases::AppError,
+    },
     domain::{
         events::DomainEvent,
         mosque::{MosqueId, MosqueSummary},
@@ -24,6 +31,10 @@ pub enum Command {
         query: String,
     },
     SaveSelection(MosqueSummary),
+    LoadMonth {
+        id: MosqueId,
+        month: u32,
+    },
 }
 
 /// Events the model understands.
@@ -36,6 +47,13 @@ pub enum AppEvent {
     /// model (spec M4 R2).
     SearchLoaded(u64, Result<Vec<MosqueSummary>, AppError>),
     SelectionSaved(Result<(), AppError>),
+    /// Month fetch result; discarded unless it matches the pending `Loading`
+    /// month and the selected mosque (spec M5 R3).
+    MonthLoaded {
+        id: MosqueId,
+        month: u32,
+        result: Result<MonthReadout, AppError>,
+    },
 }
 
 /// Startup input resolved by the composition root (spec M3 R5).
@@ -51,6 +69,7 @@ pub enum Boot {
 pub enum Screen {
     Today,
     Search,
+    Month,
 }
 
 /// Lifecycle of the today screen. `NoMosque` is never a boot state (boot
@@ -96,13 +115,51 @@ impl SearchState {
     }
 }
 
+/// Lifecycle of the month screen (spec M5 R3). No `NoMosque` variant: `m` is
+/// inert without a selection, so the screen is unreachable without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonthState {
+    Loading {
+        month: u32,
+    },
+    Ready {
+        month: u32,
+        readout: MonthReadout,
+        cursor: usize,
+    },
+    /// The directory failed; the reason is verbatim. Navigation retries by
+    /// simply moving again.
+    Failed {
+        month: u32,
+        reason: String,
+    },
+}
+
+impl MonthState {
+    /// The month currently on screen, whatever the lifecycle.
+    const fn month(&self) -> u32 {
+        match self {
+            MonthState::Loading { month }
+            | MonthState::Ready { month, .. }
+            | MonthState::Failed { month, .. } => *month,
+        }
+    }
+}
+
 pub struct AppModel {
     pub should_quit: bool,
     pub screen: Screen,
     pub today: TodayState,
     pub search: SearchState,
+    pub month: MonthState,
     /// Raw query text; trimmed before it reaches the port.
     pub query: String,
+    /// The active mosque: booted with one, or persisted via search. `None`
+    /// until then; month view needs it.
+    pub selected: Option<MosqueId>,
+    /// In-session month cache, keyed by mosque + month (spec M5 R4): a hit
+    /// renders immediately and emits no command.
+    months: HashMap<(MosqueId, u32), MonthReadout>,
     /// Monotonic query generation; rises on every edit (wrapping).
     search_epoch: u64,
     /// Domain events drained by `take_events` (consumers land in M6).
@@ -114,20 +171,26 @@ pub struct AppModel {
 impl AppModel {
     /// Boot state plus the commands the runtime must run first.
     pub fn from_boot(boot: Boot) -> (AppModel, Vec<Command>) {
-        let (screen, today, search, commands) = match boot {
+        let (screen, today, search, selected, commands) = match boot {
             Boot::Loading(id) => (
                 Screen::Today,
                 TodayState::Loading,
                 SearchState::Idle,
+                Some(id.clone()),
                 vec![Command::LoadToday(id)],
             ),
-            Boot::NoMosque => {
-                (Screen::Search, TodayState::NoMosque, SearchState::Idle, Vec::new())
-            }
+            Boot::NoMosque => (
+                Screen::Search,
+                TodayState::NoMosque,
+                SearchState::Idle,
+                None,
+                Vec::new(),
+            ),
             Boot::Failed(message) => (
                 Screen::Today,
                 TodayState::Failed(message),
                 SearchState::Idle,
+                None,
                 Vec::new(),
             ),
         };
@@ -136,7 +199,11 @@ impl AppModel {
             screen,
             today,
             search,
+            // Placeholder until the first open; never rendered before that.
+            month: MonthState::Loading { month: 1 },
             query: String::new(),
+            selected,
+            months: HashMap::new(),
             search_epoch: 0,
             events: Vec::new(),
             ticks: 0,
@@ -178,6 +245,9 @@ impl AppModel {
             }
             AppEvent::SearchLoaded(epoch, result) => self.on_search_loaded(epoch, result),
             AppEvent::SelectionSaved(result) => self.on_selection_saved(result),
+            AppEvent::MonthLoaded { id, month, result } => {
+                self.on_month_loaded(id, month, result)
+            }
         }
     }
 
@@ -185,6 +255,7 @@ impl AppModel {
         match self.screen {
             Screen::Search => self.handle_search_key(key),
             Screen::Today => self.handle_today_key(key),
+            Screen::Month => self.handle_month_key(key),
         }
     }
 
@@ -193,6 +264,8 @@ impl AppModel {
             self.should_quit = true;
         } else if is_bare(key, KeyCode::Char('s')) {
             self.screen = Screen::Search;
+        } else if is_bare(key, KeyCode::Char('m')) {
+            return self.open_month_from_today();
         }
         Vec::new()
     }
@@ -228,6 +301,131 @@ impl AppModel {
             KeyCode::Enter => self.select_cursor(),
             _ => Vec::new(),
         }
+    }
+
+    /// The month screen is not a typing screen: bare `q` quits here.
+    fn handle_month_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        if is_quit_key(key) {
+            self.should_quit = true;
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Left => self.shift_month(-1),
+            KeyCode::Right => self.shift_month(1),
+            KeyCode::Up => {
+                self.move_month_cursor(-1);
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.move_month_cursor(1);
+                Vec::new()
+            }
+            KeyCode::Char('j') if key.modifiers.is_empty() => {
+                self.move_month_cursor(1);
+                Vec::new()
+            }
+            KeyCode::Char('k') if key.modifiers.is_empty() => {
+                self.move_month_cursor(-1);
+                Vec::new()
+            }
+            KeyCode::Esc => {
+                self.screen = Screen::Today;
+                Vec::new()
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                self.screen = Screen::Search;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `m` from Today: the mosque tz anchors which month is "current"
+    /// (TZ-TRUTH — the system clock must not decide near month boundaries).
+    /// Inert until Today is Ready and a tick has arrived.
+    fn open_month_from_today(&mut self) -> Vec<Command> {
+        let TodayState::Ready(readout) = &self.today else {
+            return Vec::new();
+        };
+        let Some(now) = self.last_now else { return Vec::new() };
+        let month = date_in_utc(now, readout.tz).month();
+        self.open_month(month)
+    }
+
+    /// Cache-first month open: a hit renders immediately with no command
+    /// (issue #5 acceptance); a miss goes Loading and asks the runtime.
+    fn open_month(&mut self, month: u32) -> Vec<Command> {
+        let Some(id) = self.selected.clone() else {
+            return Vec::new();
+        };
+        self.screen = Screen::Month;
+        if let Some(readout) = self.months.get(&(id.clone(), month)) {
+            let cursor = initial_cursor(readout, self.last_now);
+            self.month = MonthState::Ready { month, readout: readout.clone(), cursor };
+            Vec::new()
+        } else {
+            self.month = MonthState::Loading { month };
+            vec![Command::LoadMonth { id, month }]
+        }
+    }
+
+    /// Wrap-around month shift from whatever lifecycle is on screen.
+    fn shift_month(&mut self, delta: isize) -> Vec<Command> {
+        let current = self.month.month();
+        let next = ((i16::try_from(current).unwrap_or(0) - 1 + delta as i16)
+            .rem_euclid(12)
+            + 1) as u32;
+        self.open_month(next)
+    }
+
+    fn move_month_cursor(&mut self, delta: isize) {
+        if let MonthState::Ready { readout, cursor, .. } = &mut self.month {
+            if readout.days.is_empty() {
+                return;
+            }
+            let len = readout.days.len();
+            let next = *cursor as isize + delta;
+            *cursor = next.clamp(0, len as isize - 1) as usize;
+        }
+    }
+
+    /// Only the pending month of the selected mosque may land; anything else
+    /// is stale (spec M5 R3).
+    fn on_month_loaded(
+        &mut self,
+        id: MosqueId,
+        month: u32,
+        result: Result<MonthReadout, AppError>,
+    ) -> Vec<Command> {
+        let MonthState::Loading { month: pending } = &self.month else {
+            return Vec::new();
+        };
+        if *pending != month || self.selected.as_ref() != Some(&id) {
+            return Vec::new();
+        }
+        match result {
+            Ok(readout) => {
+                // HONESTY: a source that quietly returns different month data
+                // must not be relabelled with the requested month.
+                if readout.month != month {
+                    self.month = MonthState::Failed {
+                        month,
+                        reason: format!(
+                            "source returned month {} for request {month}",
+                            readout.month
+                        ),
+                    };
+                } else {
+                    self.months.insert((id, month), readout.clone());
+                    let cursor = initial_cursor(&readout, self.last_now);
+                    self.month = MonthState::Ready { month, readout, cursor };
+                }
+            }
+            Err(err) => {
+                self.month = MonthState::Failed { month, reason: err.to_string() };
+            }
+        }
+        Vec::new()
     }
 
     /// Every edit starts a new query generation; a query that trims to empty
@@ -292,6 +490,7 @@ impl AppModel {
         match result {
             Ok(()) => {
                 self.events.push(DomainEvent::MosqueSelected { id: summary.id.clone() });
+                self.selected = Some(summary.id.clone());
                 self.screen = Screen::Today;
                 self.today = TodayState::Loading;
                 vec![Command::LoadToday(summary.id)]
@@ -303,6 +502,17 @@ impl AppModel {
             }
         }
     }
+}
+
+/// The row a fresh month view starts on: today's row when that day exists in
+/// the mosque-tz calendar month, else the first row. Other months start at 0.
+fn initial_cursor(readout: &MonthReadout, last_now: Option<DateTime<Utc>>) -> usize {
+    let Some(now) = last_now else { return 0 };
+    let today = date_in_utc(now, readout.tz);
+    if today.month() != readout.month {
+        return 0;
+    }
+    readout.days.iter().position(|day| day.day == today.day()).unwrap_or(0)
 }
 
 /// Quit keys, single-sourced: bare `q`, or Ctrl-C. Unknown keys are inert.

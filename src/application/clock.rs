@@ -1,6 +1,6 @@
-//! TZ-TRUTH wall-clock conversion (spec M3 R2).
+//! TZ-TRUTH wall-clock conversion (spec M3 R2, spec M5 R2).
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 
 use crate::{application::ports::TzSource, domain::prayer::DayMoment};
 
@@ -19,5 +19,15 @@ pub fn day_moment_from_utc(instant: DateTime<Utc>, tz: TzSource) -> DayMoment {
             let naive = instant.with_timezone(&Local).time();
             DayMoment::from_naive_time(naive).expect("chrono wall time fits in a day")
         }
+    }
+}
+
+/// The calendar date of a UTC instant in the governing timezone — the date
+/// twin of [`day_moment_from_utc`]. Month view anchors navigation and the
+/// today-row highlight here (spec M5 R2).
+pub fn date_in_utc(instant: DateTime<Utc>, tz: TzSource) -> NaiveDate {
+    match tz {
+        TzSource::Mosque(tz) => instant.with_timezone(&tz).date_naive(),
+        TzSource::Local => instant.with_timezone(&Local).date_naive(),
     }
 }

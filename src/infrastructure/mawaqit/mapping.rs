@@ -78,10 +78,11 @@ pub fn map_today(api: &TodayTimes, conf: &ConfData) -> Result<TodayReadout, Port
     })
 }
 
-/// Merge adhan + iqama months by day number.
+/// Merge adhan + iqama months by day number, stamped with the conf tz.
 pub fn map_month(
     adhan: &MonthTimes,
     iqama: &MonthIqamaTimes,
+    conf: &ConfData,
 ) -> Result<MonthReadout, PortError> {
     let mut days = Vec::with_capacity(adhan.days.len());
     for day in &adhan.days {
@@ -97,7 +98,12 @@ pub fn map_month(
         };
         row.iqama = Some(parse_iqama(&iq.times)?);
     }
-    Ok(MonthReadout { month: adhan.month, days, dropped: adhan.dropped.clone() })
+    Ok(MonthReadout {
+        month: adhan.month,
+        tz: resolve_tz(conf),
+        days,
+        dropped: adhan.dropped.clone(),
+    })
 }
 
 /// Search results → summaries. A slug-less result fails the whole page:

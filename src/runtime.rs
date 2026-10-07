@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::{
     application::{
         ports::{Clock, MosqueDirectory, SettingsStore, TimesService},
-        use_cases::{LoadToday, SaveSelection, SearchMosques},
+        use_cases::{LoadMonth, LoadToday, SaveSelection, SearchMosques},
     },
     ui::app::{AppEvent, AppModel, Boot, Command},
 };
@@ -136,6 +136,16 @@ where
                     let result = SaveSelection { settings: deps.settings.as_ref() }
                         .execute(&summary);
                     let _ = event_tx.send(AppEvent::SelectionSaved(result)).await;
+                }
+                Command::LoadMonth { id, month } => {
+                    let times = Arc::clone(&deps.times);
+                    let tx = event_tx.clone();
+                    tokio::spawn(async move {
+                        let result =
+                            LoadMonth { times: times.as_ref() }.execute(&id, month).await;
+                        let _ =
+                            tx.send(AppEvent::MonthLoaded { id, month, result }).await;
+                    });
                 }
             }
         }
