@@ -3,7 +3,7 @@
 
 pub mod mapping;
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use mawaqit_api::{
     ConfData, MawaqitClient, MawaqitError, MonthIqamaTimes, MonthTimes, TodayTimes,
@@ -29,16 +29,16 @@ pub struct MawaqitAdapter {
     client: MawaqitClient,
 }
 
-impl Default for MawaqitAdapter {
-    fn default() -> MawaqitAdapter {
-        MawaqitAdapter::new()
-    }
-}
-
 impl MawaqitAdapter {
-    pub fn new() -> MawaqitAdapter {
+    /// Adapter with an offline snapshot cache under `snapshot_dir`
+    /// (ADR-0003 §1): the crate's disk layer writes per-mosque envelopes
+    /// there and serves them when the network fails (40-day TTL, year
+    /// rule, sanitize-on-load — all crate-side).
+    pub fn new(snapshot_dir: PathBuf) -> MawaqitAdapter {
         MawaqitAdapter::from_client(
-            MawaqitClient::new().with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+            MawaqitClient::new()
+                .with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+                .with_disk_cache(snapshot_dir),
         )
     }
 

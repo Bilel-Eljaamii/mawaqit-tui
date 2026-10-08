@@ -103,15 +103,6 @@ where
     loop {
         for command in commands.drain(..) {
             match command {
-                Command::LoadToday(id) => {
-                    let times = Arc::clone(&deps.times);
-                    let tx = event_tx.clone();
-                    tokio::spawn(async move {
-                        let result =
-                            LoadToday { times: times.as_ref() }.execute(&id).await;
-                        let _ = tx.send(AppEvent::TodayLoaded(result)).await;
-                    });
-                }
                 Command::Search { epoch, query } => {
                     latest_search.store(epoch, Ordering::Release);
                     let directory = Arc::clone(&deps.times);
@@ -137,14 +128,22 @@ where
                         .execute(&summary);
                     let _ = event_tx.send(AppEvent::SelectionSaved(result)).await;
                 }
-                Command::LoadMonth { id, month } => {
+                other => {
+                    // Network commands run through the shared performer so
+                    // the live loop and the e2e scripted loop cannot drift
+                    // (spec M6 R5).
                     let times = Arc::clone(&deps.times);
+                    let clock = Arc::clone(&deps.clock);
+                    let settings = Arc::clone(&deps.settings);
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        let result =
-                            LoadMonth { times: times.as_ref() }.execute(&id, month).await;
-                        let _ =
-                            tx.send(AppEvent::MonthLoaded { id, month, result }).await;
+                        let mut ctx = CommandCtx {
+                            times: times.as_ref(),
+                            clock: clock.as_ref(),
+                            settings: settings.as_ref(),
+                        };
+                        let event = perform(&mut ctx, other).await;
+                        let _ = tx.send(event).await;
                     });
                 }
             }
@@ -181,4 +180,114 @@ where
         }
     }
     Ok(())
+}
+
+/// The single command→event match, shared by the live runtime and the e2e
+/// scripted loop (spec M6 R5): whichever path runs a command, the same use
+/// case executes against the same ports. Debounce stays in the live loop —
+/// it is a *timing* concern, not a command semantic.
+pub struct CommandCtx<
+    'a,
+    T: TimesService + MosqueDirectory + ?Sized,
+    C: Clock + ?Sized,
+    S: SettingsStore + ?Sized,
+> {
+    pub times: &'a T,
+    pub clock: &'a C,
+    pub settings: &'a S,
+}
+
+pub async fn perform<T, C, S>(
+    ctx: &mut CommandCtx<'_, T, C, S>,
+    command: Command,
+) -> AppEvent
+where
+    T: TimesService + MosqueDirectory + Send + Sync,
+    C: Clock + Send + Sync,
+    S: SettingsStore + Send + Sync,
+{
+    match command {
+        Command::LoadToday(id) => {
+            AppEvent::TodayLoaded(LoadToday { times: ctx.times }.execute(&id).await)
+        }
+        Command::Search { epoch, query } => AppEvent::SearchLoaded(
+            epoch,
+            SearchMosques { directory: ctx.times }.execute(&query).await,
+        ),
+        Command::SaveSelection(summary) => AppEvent::SelectionSaved(
+            SaveSelection { settings: ctx.settings }.execute(&summary),
+        ),
+        Command::LoadMonth { id, month } => AppEvent::MonthLoaded {
+            id: id.clone(),
+            month,
+            result: LoadMonth { times: ctx.times }.execute(&id, month).await,
+        },
+    }
+}
+
+/// The e2e seam (spec M6 R5): boot → apply each scripted event → drain and
+/// perform every emitted command inline → feed results back until quiet →
+/// next event. Same model, same use cases, same command semantics as the
+/// live loop; no terminal, no network, no sleeps.
+pub async fn run_scripted<T, C, S>(
+    deps: Runtime<T, C, S>,
+    boot: Boot,
+    script: Vec<AppEvent>,
+) -> AppModel
+where
+    T: TimesService + MosqueDirectory + Send + Sync + 'static,
+    C: Clock + Send + Sync + 'static,
+    S: SettingsStore + Send + Sync + 'static,
+{
+    let (mut model, mut commands) = AppModel::from_boot(boot);
+    model.update(AppEvent::Tick(deps.clock.now_utc()));
+
+    for scripted in script {
+        // Drain the command queue to quiescence before the next scripted
+        // event, feeding resulting events straight back into the model.
+        loop {
+            let mut resulting = Vec::new();
+            for command in commands.drain(..) {
+                let mut ctx = CommandCtx {
+                    times: deps.times.as_ref(),
+                    clock: deps.clock.as_ref(),
+                    settings: deps.settings.as_ref(),
+                };
+                resulting.push(perform(&mut ctx, command).await);
+            }
+            if resulting.is_empty() {
+                break;
+            }
+            for event in resulting {
+                for command in model.update(event) {
+                    commands.push(command);
+                }
+            }
+        }
+        for command in model.update(scripted) {
+            commands.push(command);
+        }
+    }
+
+    // Final quiescence: the last scripted event may have left commands.
+    loop {
+        let mut resulting = Vec::new();
+        for command in commands.drain(..) {
+            let mut ctx = CommandCtx {
+                times: deps.times.as_ref(),
+                clock: deps.clock.as_ref(),
+                settings: deps.settings.as_ref(),
+            };
+            resulting.push(perform(&mut ctx, command).await);
+        }
+        if resulting.is_empty() {
+            break;
+        }
+        for event in resulting {
+            for command in model.update(event) {
+                commands.push(command);
+            }
+        }
+    }
+    model
 }

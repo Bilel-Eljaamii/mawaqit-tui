@@ -93,6 +93,71 @@ proptest! {
         prop_assert_eq!(id.as_str(), s);
     }
 
+    /// HOSTILE-INPUT-TOTAL, mutant-killing form (M6): parse succeeds IFF
+    /// the strict strict-shape predicate holds — bytes 0,1,3,4 digits,
+    /// byte 2 a colon, hour ≤ 23, minute ≤ 59. Anything else — unicode
+    /// digits, extra seconds, leading `+`, whitespace — must be rejected.
+    #[test]
+    fn parse_validity_iff_strict_shape(s in ".*") {
+        let chars: Vec<char> = s.chars().collect();
+        let digits = |cs: &[char]| -> Option<u8> {
+            let mut value = 0u8;
+            for c in cs {
+                let d = c.to_digit(10)? as u8;
+                value = value.checked_mul(10)?.checked_add(d)?;
+            }
+            Some(value)
+        };
+        let strict = chars.len() == 5
+            && chars[2] == ':'
+            && (0..5).all(|i| i == 2 || chars[i].is_ascii_digit())
+            && digits(&chars[0..2]).is_some_and(|h| h <= 23)
+            && digits(&chars[3..5]).is_some_and(|m| m <= 59);
+        prop_assert_eq!(
+            ClockTime::parse_hhmm(&s).is_ok(),
+            strict,
+            "parse/strict-shape disagreement on {:?}",
+            s
+        );
+    }
+
+    /// Slug validation rejects the hostile families outright: traversal
+    /// (`..`), separators (`/`), query/fragment metacharacters (`?`, `#`),
+    /// encoding (`%`), and whitespace — each guaranteed present.
+    #[test]
+    fn slug_rejects_hostile_families(
+        body in "[a-z0-9_-]{1,10}",
+        poison in proptest::sample::select(vec![
+            "..", "/", "?", "#", "%20", " ",
+        ]),
+    ) {
+        let hostile = format!("{body}{poison}{body}");
+        prop_assert!(
+            MosqueId::parse(&hostile).is_err(),
+            "{:?} must be rejected",
+            hostile
+        );
+    }
+
+    /// Whitespace variants are rejected, not trimmed — and uppercase is
+    /// ACCEPTED (the alphabet is `is_ascii_alphanumeric`, unlike the
+    /// lowercase mawaqit.net slugs): pinning the actual contract. (R6)
+    #[test]
+    fn slug_whitespace_rejected_uppercase_accepted(
+        body in "[a-z]{1,10}",
+        pad in proptest::sample::select(vec![" ", "\t", "\n"]),
+    ) {
+        let upper = body.to_uppercase();
+        prop_assert!(
+            MosqueId::parse(&upper).is_ok(),
+            "uppercase {upper:?} is within the alphabet"
+        );
+        let padded_start = format!("{}{}", pad, body);
+        let padded_end = format!("{}{}", body, pad);
+        prop_assert!(MosqueId::parse(&padded_start).is_err());
+        prop_assert!(MosqueId::parse(&padded_end).is_err());
+    }
+
     /// ROLLOVER-CORRECT at second resolution: selection matches the minute
     /// model, remaining stays bounded, and into+remaining == interval for
     /// every valid set — degenerate all-equal sets included. (spec M3 R1)

@@ -1330,3 +1330,243 @@ mod month_screen {
         assert!(text.contains("dropped: 3"), "dropped list missing: {text:?}");
     }
 }
+
+// ---- M6: offline retention, retries, help overlay (spec M6 R2–R4) ----------
+
+mod offline_help {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use mawaqit_tui::{
+        application::{ports::PortError, use_cases::AppError},
+        domain::mosque::MosqueId,
+        ui::app::{AppEvent, AppModel, Boot, Command, Screen, TodayState},
+    };
+
+    use super::{fixed_now, readout};
+
+    fn key(code: KeyCode) -> AppEvent {
+        AppEvent::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ch(c: char) -> AppEvent {
+        key(KeyCode::Char(c))
+    }
+
+    fn ctrl_c() -> AppEvent {
+        AppEvent::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))
+    }
+
+    fn network_err() -> AppError {
+        AppError::Port(PortError::Network("boom".into()))
+    }
+
+    /// A Ready Today ticked at the fixed instant, selected mosque intact.
+    fn ready_today() -> AppModel {
+        let mut model =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("m").unwrap())).0;
+        model.update(AppEvent::TodayLoaded(Ok(readout())));
+        model.update(AppEvent::Tick(fixed_now()));
+        model
+    }
+
+    /// Drive the model offline: a Ready Today whose refresh just failed.
+    fn offline_today() -> AppModel {
+        let mut model = ready_today();
+        model.update(AppEvent::TodayLoaded(Err(network_err())));
+        model
+    }
+
+    #[test]
+    fn failed_refresh_retains_last_good_and_raises_offline() {
+        // @tier ephemeral
+        let model = offline_today();
+        assert_eq!(model.offline.as_deref(), Some("network failure: boom"));
+        // Last-good data stays on screen — never blanked.
+        assert_eq!(model.today, TodayState::Ready(readout()));
+    }
+
+    /// First-boot failure with nothing retained is the honest error, not a
+    /// badge over an empty screen.
+    #[test]
+    fn boot_failure_without_last_good_stays_failed() {
+        // @tier ephemeral
+        let mut model =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("m").unwrap())).0;
+        model.update(AppEvent::TodayLoaded(Err(network_err())));
+        assert_eq!(model.offline, None);
+        assert!(matches!(model.today, TodayState::Failed(_)));
+    }
+
+    #[test]
+    fn successful_load_clears_the_offline_badge() {
+        // @tier ephemeral
+        let mut model = offline_today();
+        model.update(AppEvent::TodayLoaded(Ok(readout())));
+        assert_eq!(model.offline, None);
+    }
+
+    #[test]
+    fn r_on_ready_refetches_without_flipping_to_loading() {
+        // @tier ephemeral
+        let mut model = offline_today();
+        let commands = model.update(ch('r'));
+        let id = MosqueId::parse("m").unwrap();
+        assert_eq!(commands, vec![Command::LoadToday(id)]);
+        // Retained data must not be blanked by a manual refresh.
+        assert!(matches!(model.today, TodayState::Ready(_)));
+    }
+
+    #[test]
+    fn r_on_failed_goes_loading() {
+        // @tier ephemeral
+        let mut model =
+            AppModel::from_boot(Boot::Loading(MosqueId::parse("m").unwrap())).0;
+        model.update(AppEvent::TodayLoaded(Err(network_err())));
+        let commands = model.update(ch('r'));
+        assert_eq!(commands, vec![Command::LoadToday(MosqueId::parse("m").unwrap())]);
+        assert_eq!(model.today, TodayState::Loading);
+    }
+
+    /// No selection (boot-failed config): nothing to refresh.
+    #[test]
+    fn r_without_selection_is_inert() {
+        // @tier ephemeral
+        let mut model = AppModel::from_boot(Boot::Failed("corrupt".into())).0;
+        assert!(model.update(ch('r')).is_empty());
+    }
+
+    #[test]
+    fn auto_retry_fires_on_the_30th_tick_only() {
+        // @tier ephemeral
+        // offline_today() carries one priming tick already (ticks == 1).
+        let mut model = offline_today();
+        let id = MosqueId::parse("m").unwrap();
+        let boundary = mawaqit_tui::ui::app::AppModel::OFFLINE_RETRY_TICKS;
+        while model.ticks() < boundary - 1 {
+            assert!(
+                model.update(AppEvent::Tick(fixed_now())).is_empty(),
+                "tick {} must not retry",
+                model.ticks()
+            );
+        }
+        assert_eq!(
+            model.update(AppEvent::Tick(fixed_now())),
+            vec![Command::LoadToday(id)]
+        );
+    }
+
+    #[test]
+    fn auto_retry_requires_offline_and_selection() {
+        // @tier ephemeral
+        // Live (not offline): the 30th tick is just a tick.
+        let mut model = ready_today();
+        for _ in 0..mawaqit_tui::ui::app::AppModel::OFFLINE_RETRY_TICKS {
+            assert!(model.update(AppEvent::Tick(fixed_now())).is_empty());
+        }
+        // Offline but no selection: nothing to re-fetch.
+        let mut model = AppModel::from_boot(Boot::Failed("corrupt".into())).0;
+        model.offline = Some("boom".into());
+        for _ in 0..mawaqit_tui::ui::app::AppModel::OFFLINE_RETRY_TICKS {
+            assert!(model.update(AppEvent::Tick(fixed_now())).is_empty());
+        }
+    }
+
+    // -- help overlay (spec M6 R3) ----------------------------------------
+
+    #[test]
+    fn help_toggles_from_every_screen() {
+        // @tier ephemeral
+        for screen in ["today", "search"] {
+            let mut model = ready_today();
+            if screen == "search" {
+                model.update(ch('s'));
+            }
+            model.update(ch('?'));
+            assert!(model.show_help, "? must open help on {screen}");
+            model.update(key(KeyCode::Esc));
+            assert!(!model.show_help, "Esc must close help on {screen}");
+        }
+    }
+
+    /// While help is shown: `?`/Esc close, Ctrl-C quits, everything else is
+    /// swallowed — including the screen's own keys.
+    #[test]
+    fn help_swallows_keys_except_close_and_quit() {
+        // @tier ephemeral
+        // On Search, typing must not leak into the query through the overlay.
+        let mut model = ready_today();
+        model.update(ch('s'));
+        model.update(ch('x')); // query "x"
+        model.update(ch('?')); // help up
+        model.update(ch('q')); // swallowed: no quit, no close per spec
+        assert!(model.show_help);
+        assert!(!model.should_quit);
+        model.update(ch('y')); // swallowed: query unchanged
+        model.update(key(KeyCode::Esc)); // closes
+        assert!(!model.show_help);
+        assert_eq!(model.query, "x");
+
+        // Today screen under help: `m`/`r`/`s` stay inert while it is up.
+        let mut model = ready_today();
+        model.update(ch('?'));
+        assert!(model.update(ch('r')).is_empty());
+        assert!(model.update(ch('s')).is_empty());
+        assert_eq!(model.screen, Screen::Today);
+        model.update(ch('?')); // close via ?
+        assert!(!model.show_help);
+
+        // Ctrl-C quits even with help up.
+        let mut model = ready_today();
+        model.update(ch('?'));
+        model.update(ctrl_c());
+        assert!(model.should_quit);
+    }
+
+    // -- render smokes (TestBackend) ---------------------------------------
+
+    fn render(model: &AppModel) -> String {
+        let backend = ratatui::backend::TestBackend::new(64, 14);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| mawaqit_tui::ui::draw::draw(frame, model)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn offline_badge_renders_over_last_good() {
+        // @tier ephemeral
+        let mut model = offline_today();
+        model.update(AppEvent::Tick(fixed_now()));
+        let text = render(&model);
+        assert!(text.contains("OFFLINE"), "badge missing: {text:?}");
+        assert!(text.contains("Grande Mosquée"), "last-good data must stay: {text:?}");
+    }
+
+    #[test]
+    fn skeletons_render_on_loading_screens() {
+        // @tier ephemeral
+        let model = AppModel::from_boot(Boot::Loading(MosqueId::parse("m").unwrap())).0;
+        let text = render(&model);
+        assert!(text.contains("loading today's times"), "today skeleton: {text:?}");
+        assert!(text.contains('·'), "skeleton rows missing: {text:?}");
+    }
+
+    #[test]
+    fn help_overlay_renders_the_keybinding_table() {
+        // @tier ephemeral
+        let mut model = ready_today();
+        model.update(ch('?'));
+        let text = render(&model);
+        assert!(text.contains("Keys"), "header missing: {text:?}");
+        assert!(text.contains("q / Ctrl-C"), "quit row missing: {text:?}");
+        assert!(text.contains("Left / Right"), "month row missing: {text:?}");
+        assert!(text.contains("? / Esc closes"), "title missing: {text:?}");
+    }
+}

@@ -166,6 +166,13 @@ pub struct AppModel {
     events: Vec<DomainEvent>,
     ticks: u64,
     last_now: Option<DateTime<Utc>>,
+    /// Offline degradation (spec M6 R2): `Some(reason)` when the last
+    /// Today fetch failed *and* last-good data is retained on screen.
+    /// `None` means live. Cleared by any successful load.
+    pub offline: Option<String>,
+    /// The help overlay (`?`): drawn over any screen; keys inert while
+    /// shown except `?`/`Esc` (close) and Ctrl-C (quit). Spec M6 R3.
+    pub show_help: bool,
 }
 
 impl AppModel {
@@ -208,6 +215,8 @@ impl AppModel {
             events: Vec::new(),
             ticks: 0,
             last_now: None,
+            offline: None,
+            show_help: false,
         };
         (model, commands)
     }
@@ -215,6 +224,10 @@ impl AppModel {
     pub const fn ticks(&self) -> u64 {
         self.ticks
     }
+
+    /// Ticks between automatic offline retries (~30 s at the 1 Hz tick).
+    /// Deterministic policy (ADR-0003 §3): no backoff state machine.
+    pub const OFFLINE_RETRY_TICKS: u64 = 30;
 
     /// Latest `Tick` instant — the view's only time source.
     pub const fn last_now(&self) -> Option<DateTime<Utc>> {
@@ -234,13 +247,10 @@ impl AppModel {
             AppEvent::Tick(now) => {
                 self.ticks = self.ticks.wrapping_add(1);
                 self.last_now = Some(now);
-                Vec::new()
+                self.retry_offline()
             }
             AppEvent::TodayLoaded(result) => {
-                self.today = match result {
-                    Ok(readout) => TodayState::Ready(readout),
-                    Err(err) => TodayState::Failed(err.to_string()),
-                };
+                self.on_today_loaded(result);
                 Vec::new()
             }
             AppEvent::SearchLoaded(epoch, result) => self.on_search_loaded(epoch, result),
@@ -252,6 +262,20 @@ impl AppModel {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        // The help overlay swallows everything except `?`/Esc (close) and
+        // Ctrl-C (quit — spec M6 R3); bare `q` is inert while help is up.
+        if self.show_help {
+            if is_force_quit_key(key) {
+                self.should_quit = true;
+            } else if is_bare(key, KeyCode::Char('?')) || key.code == KeyCode::Esc {
+                self.show_help = false;
+            }
+            return Vec::new();
+        }
+        if is_bare(key, KeyCode::Char('?')) {
+            self.show_help = true;
+            return Vec::new();
+        }
         match self.screen {
             Screen::Search => self.handle_search_key(key),
             Screen::Today => self.handle_today_key(key),
@@ -266,8 +290,58 @@ impl AppModel {
             self.screen = Screen::Search;
         } else if is_bare(key, KeyCode::Char('m')) {
             return self.open_month_from_today();
+        } else if is_bare(key, KeyCode::Char('r')) {
+            return self.refresh_today();
         }
         Vec::new()
+    }
+
+    /// Manual refresh (`r`, spec M6 R2): re-fetch when a mosque is
+    /// selected. Retained data stays on screen — only a dataless screen
+    /// degrades to `Loading` (HONESTY: loading ≠ blanking last-good).
+    fn refresh_today(&mut self) -> Vec<Command> {
+        match (&self.selected, &self.today) {
+            (Some(id), TodayState::Ready(_)) => vec![Command::LoadToday(id.clone())],
+            (Some(id), TodayState::Failed(_) | TodayState::Loading) => {
+                self.today = TodayState::Loading;
+                vec![Command::LoadToday(id.clone())]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The offline retry (spec M6 R2): while degraded, every
+    /// [`Self::OFFLINE_RETRY_TICKS`] ticks re-emit `LoadToday`.
+    fn retry_offline(&mut self) -> Vec<Command> {
+        if self.offline.is_some()
+            && self.ticks.is_multiple_of(Self::OFFLINE_RETRY_TICKS)
+            && let Some(id) = self.selected.clone()
+        {
+            return vec![Command::LoadToday(id)];
+        }
+        Vec::new()
+    }
+
+    /// Today fetch resolved (spec M6 R2): success clears the offline
+    /// degradation; failure with retained last-good data degrades to the
+    /// badge instead of blanking the screen; failure with nothing retained
+    /// is the honest first-boot error.
+    fn on_today_loaded(&mut self, result: Result<TodayReadout, AppError>) {
+        match result {
+            Ok(readout) => {
+                self.offline = None;
+                self.today = TodayState::Ready(readout);
+            }
+            Err(err) => {
+                if let TodayState::Ready(last_good) = self.today.clone() {
+                    self.offline = Some(err.to_string());
+                    self.today = TodayState::Ready(last_good);
+                } else {
+                    self.offline = None;
+                    self.today = TodayState::Failed(err.to_string());
+                }
+            }
+        }
     }
 
     /// On Search, bare `q` is a literal query character; only Ctrl-C quits

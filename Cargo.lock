@@ -1274,9 +1274,9 @@ dependencies = [
 
 [[package]]
 name = "mawaqit-api"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47ef50b871794d1a05017a3388e64ee51e19e7ba55294e2ce64bb4ffeb094028"
+checksum = "a90080e433f9f77a2a66f701ce1ec7cb162c334cc4b319c176e17f77809c0407"
 dependencies = [
  "chrono",
  "crc32fast",

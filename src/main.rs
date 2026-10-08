@@ -9,6 +9,7 @@ use mawaqit_tui::{
         clock::SystemClock,
         mawaqit::MawaqitAdapter,
         settings::{NullSettings, TomlSettings},
+        snapshot::cache_dir,
     },
     runtime::{self, Runtime},
     ui::app::Boot,
@@ -30,8 +31,13 @@ async fn main() -> std::io::Result<()> {
                     Err(err) => Boot::Failed(err.to_string()),
                 },
             };
-            start(Arc::new(MawaqitAdapter::new()), Arc::new(SystemClock), settings, boot)
-                .await
+            start(
+                Arc::new(MawaqitAdapter::new(cache_dir())),
+                Arc::new(SystemClock),
+                settings,
+                boot,
+            )
+            .await
         }
         None => {
             let boot = match cli_mosque {
@@ -39,7 +45,7 @@ async fn main() -> std::io::Result<()> {
                 None => Boot::Failed("no config directory on this platform".to_owned()),
             };
             start(
-                Arc::new(MawaqitAdapter::new()),
+                Arc::new(MawaqitAdapter::new(cache_dir())),
                 Arc::new(SystemClock),
                 Arc::new(NullSettings),
                 boot,
