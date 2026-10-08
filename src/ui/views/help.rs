@@ -42,11 +42,9 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         meaning: "previous / next month",
     },
     HelpEntry {
-        keys: "Up / Down / j / k",
-        context: "Month",
-        meaning: "move the day cursor",
+        keys: "Up/Down · j/k", context: "Month", meaning: "move the day cursor"
     },
-    HelpEntry { keys: "Up / Down", context: "Search", meaning: "move the result cursor" },
+    HelpEntry { keys: "Up/Down", context: "Search", meaning: "move the result cursor" },
     HelpEntry {
         keys: "Enter",
         context: "Search",
@@ -57,7 +55,7 @@ pub const HELP_ENTRIES: &[HelpEntry] = &[
         context: "Search",
         meaning: "delete a query character",
     },
-    HelpEntry { keys: "Esc", context: "Month, Search, help", meaning: "back / close" },
+    HelpEntry { keys: "Esc", context: "Month/Search/help", meaning: "back / close" },
 ];
 
 pub fn render(frame: &mut Frame, model: &AppModel) {
@@ -75,7 +73,7 @@ pub fn render(frame: &mut Frame, model: &AppModel) {
     });
 
     let header = Row::new(["Keys", "Where", "What it does"]).style(theme::title());
-    let widths = [Constraint::Length(16), Constraint::Length(16), Constraint::Min(20)];
+    let widths = [Constraint::Length(18), Constraint::Length(18), Constraint::Min(20)];
 
     let [table_area, note] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);

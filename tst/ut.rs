@@ -1060,8 +1060,6 @@ mod month_screen {
         (model, id)
     }
 
-    /// `opened_month` with the October readout delivered (Ready, cursor on
-    /// day 6 = index 5).
     fn ready_month() -> (AppModel, MosqueId) {
         let (mut model, id) = opened_month();
         model.update(AppEvent::MonthLoaded {
@@ -1560,13 +1558,27 @@ mod offline_help {
 
     #[test]
     fn help_overlay_renders_the_keybinding_table() {
-        // @tier ephemeral
+        // @tier durable — every HELP_ENTRIES row must render; the table is
+        // the single source of the binding reference. Tall terminal: the
+        // full 13-row table must fit (the shared render is 64×14 and would
+        // clip the last rows).
         let mut model = ready_today();
         model.update(ch('?'));
-        let text = render(&model);
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| mawaqit_tui::ui::draw::draw(frame, &model)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect();
         assert!(text.contains("Keys"), "header missing: {text:?}");
-        assert!(text.contains("q / Ctrl-C"), "quit row missing: {text:?}");
-        assert!(text.contains("Left / Right"), "month row missing: {text:?}");
         assert!(text.contains("? / Esc closes"), "title missing: {text:?}");
+        for entry in mawaqit_tui::ui::views::help::HELP_ENTRIES {
+            assert!(text.contains(entry.keys), "keys missing: {text:?}");
+            assert!(text.contains(entry.meaning), "meaning missing: {text:?}");
+        }
     }
 }
