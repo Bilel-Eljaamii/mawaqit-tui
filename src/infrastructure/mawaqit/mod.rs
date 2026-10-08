@@ -42,7 +42,9 @@ impl MawaqitAdapter {
         )
     }
 
-    pub fn from_client(client: MawaqitClient) -> MawaqitAdapter {
+    /// Test seam: build the adapter over a pre-configured client. Private —
+    /// nothing outside `new()` has a reason to promise this constructor.
+    fn from_client(client: MawaqitClient) -> MawaqitAdapter {
         MawaqitAdapter { client }
     }
 

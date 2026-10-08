@@ -82,13 +82,15 @@ pub fn render(frame: &mut Frame, model: &AppModel) {
         Table::new(rows, widths).header(header).block(Block::new()),
         table_area,
     );
+    // The offline state carries its verbatim reason — show it, not just a
+    // yes/no (HONESTY: errors verbatim, ADR-0001 §3).
+    let offline = match &model.offline {
+        Some(reason) => format!("offline ({reason})"),
+        None => "live".to_owned(),
+    };
     frame.render_widget(
-        Paragraph::new(format!(
-            "screen: {:?} · offline: {}",
-            model.screen,
-            if model.offline.is_some() { "yes" } else { "no" }
-        ))
-        .style(theme::muted()),
+        Paragraph::new(format!("screen: {:?} · {offline}", model.screen))
+            .style(theme::muted()),
         note,
     );
 }

@@ -428,6 +428,9 @@ impl AppModel {
 
     /// Cache-first month open: a hit renders immediately with no command
     /// (issue #5 acceptance); a miss goes Loading and asks the runtime.
+    /// A revisit resets the cursor to today's row — accepted (red-team
+    /// 2026-10-08 F5): remembering per-month cursors costs state the
+    /// 1-session cache doesn't justify.
     fn open_month(&mut self, month: u32) -> Vec<Command> {
         let Some(id) = self.selected.clone() else {
             return Vec::new();

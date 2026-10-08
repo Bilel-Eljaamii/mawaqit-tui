@@ -1581,4 +1581,24 @@ mod offline_help {
             assert!(text.contains(entry.meaning), "meaning missing: {text:?}");
         }
     }
+
+    /// The offline reason is stored verbatim and must be discoverable —
+    /// "offline: yes" alone hides *why* (HONESTY).
+    #[test]
+    fn help_overlay_shows_the_verbatim_offline_reason() {
+        // @tier ephemeral
+        let mut model = offline_today();
+        model.update(ch('?'));
+        let text = render(&model);
+        assert!(
+            text.contains("offline (network failure: boom)"),
+            "verbatim reason missing from help: {text:?}"
+        );
+
+        // Live models say so plainly.
+        let mut model = ready_today();
+        model.update(ch('?'));
+        let text = render(&model);
+        assert!(text.contains("· live"), "live marker missing: {text:?}");
+    }
 }
